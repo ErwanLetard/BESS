@@ -3,6 +3,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from io import BytesIO
 
 # Function to fetch equivalent production hours from PVGIS API
 def get_equivalent_production_hours(lat, lon, installed_capacity_kw, system_loss, startyear=2018, endyear=2020):
@@ -97,7 +98,8 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                                   battery_cost_per_mwh, installation_cost_per_mwp,
                                   maintenance_cost_per_mwp,
                                   maintenance_cost_per_mwh_battery, battery_lifespan,
-                                  panel_degradation_rate, min_state_of_charge, electricity_price, sell_price, progress_bar):
+                                  panel_degradation_rate, min_state_of_charge, electricity_price, sell_price, progress_bar,
+                                  use_batteries=True):
     configurations = []
 
     total_years = end_year - start_year + 1
@@ -122,21 +124,29 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
     coarse_step_size_mwp = max_solar_capacity_mwp / 10  # 10% of max capacity
     coarse_step_size_mwp = max(coarse_step_size_mwp, 0.1)  # Ensure a minimum step size
 
-    # Average Daily Consumption (kWh)
-    average_daily_consumption_kwh = total_consumption_per_year / 365
+    if use_batteries:
+        # Average Daily Consumption (kWh)
+        average_daily_consumption_kwh = total_consumption_per_year / 365
 
-    # Maximum Battery Capacity (MWh) to cover 2 days of consumption
-    max_battery_capacity_mwh = (average_daily_consumption_kwh * 2) / 1000  # Convert kWh to MWh
+        # Maximum Battery Capacity (MWh) to cover 2 days of consumption
+        max_battery_capacity_mwh = (average_daily_consumption_kwh * 2) / 1000  # Convert kWh to MWh
 
-    # Coarse Step Size for Batteries (MWh) based on total yearly consumption
-    coarse_step_size_mwh = max_battery_capacity_mwh / 10  # 10% of max capacity
-    coarse_step_size_mwh = max(coarse_step_size_mwh, 0.1)  # Ensure a minimum step size
+        # Coarse Step Size for Batteries (MWh) based on total yearly consumption
+        coarse_step_size_mwh = max_battery_capacity_mwh / 10  # 10% of max capacity
+        coarse_step_size_mwh = max(coarse_step_size_mwh, 0.1)  # Ensure a minimum step size
 
-    # Generate arrays for coarse search
-    panel_sizes_mwp_coarse = np.arange(0.0, max_solar_capacity_mwp + coarse_step_size_mwp, coarse_step_size_mwp)
-    battery_sizes_mwh_coarse = np.arange(0.0, max_battery_capacity_mwh + coarse_step_size_mwh, coarse_step_size_mwh)
+        # Generate arrays for coarse search
+        panel_sizes_mwp_coarse = np.arange(0.0, max_solar_capacity_mwp + coarse_step_size_mwp, coarse_step_size_mwp)
+        battery_sizes_mwh_coarse = np.arange(0.0, max_battery_capacity_mwh + coarse_step_size_mwh, coarse_step_size_mwh)
 
-    total_iterations = len(panel_sizes_mwp_coarse) * len(battery_sizes_mwh_coarse)
+        total_iterations = len(panel_sizes_mwp_coarse) * len(battery_sizes_mwh_coarse)
+    else:
+        # If not using batteries, only optimize panels
+        panel_sizes_mwp_coarse = np.arange(0.0, max_solar_capacity_mwp + coarse_step_size_mwp, coarse_step_size_mwp)
+        battery_sizes_mwh_coarse = [0.0]  # Fixed at 0
+
+        total_iterations = len(panel_sizes_mwp_coarse)
+
     current_iteration = 0
 
     st.write("🔍 **Phase 1: Coarse Search**")
@@ -147,193 +157,8 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
         # Precompute solar production for all hours
         solar_production = (panel_area_m2 * irradiation_array * module_efficiency) * (1 - system_loss / 100)
 
-        for batteries_mwh in battery_sizes_mwh_coarse:
-            # Define min and max battery states
-            min_battery_state = batteries_mwh * 1000 * min_state_of_charge  # kWh
-            max_battery_state = batteries_mwh * 1000  # kWh
-
-            battery_state = max_battery_state  # Start at full charge
-
-            covered_by_panels = 0
-            covered_by_batteries = 0
-            not_covered = 0
-
-            # Initialize total excess energy for this configuration
-            total_excess_energy_kwh = 0
-
-            for hour in range(len(load_curve)):
-                production = solar_production[hour]
-                consumption = load_curve[hour]
-
-                if production >= consumption:
-                    surplus = production - consumption
-
-                    # Charge the battery with surplus energy
-                    available_storage = max_battery_state - battery_state
-                    energy_to_store = min(surplus, available_storage)
-                    battery_state += energy_to_store
-
-                    covered_by_panels += consumption
-
-                    # Sell excess energy to the grid if any
-                    excess_energy = surplus - energy_to_store
-                    if excess_energy > 0:
-                        total_excess_energy_kwh += excess_energy
-                else:
-                    deficit = consumption - production
-
-                    # Discharge the battery to cover the deficit
-                    available_energy = battery_state - min_battery_state
-                    energy_from_battery = min(available_energy, deficit)
-                    battery_state -= energy_from_battery
-                    covered_by_batteries += energy_from_battery
-
-                    uncovered_energy = deficit - energy_from_battery
-                    not_covered += uncovered_energy
-
-                    covered_by_panels += production
-
-                # Check if battery state exceeds capacity or goes below min SOC
-                if battery_state > max_battery_state + 1e-6 or battery_state < min_battery_state - 1e-6:
-                    break  # Invalid battery state, skip to next configuration
-
-            else:
-                # Completed all hours without invalid battery state
-                total_consumption = sum(load_curve)
-                portion_covered = ((covered_by_panels + covered_by_batteries) / total_consumption) * 100
-
-                # Since we're removing target coverage, we don't skip based on coverage
-                # Instead, collect all configurations
-
-                # Calculate the total energy used per year
-                total_used_energy_per_year = (covered_by_panels + covered_by_batteries) / total_years
-
-                # Adjust total used energy for the project lifetime and degradation
-                degradation_factors = [(1 - panel_degradation_rate) ** year for year in range(project_lifetime)]
-                lifetime_used_energy_kwh = sum(total_used_energy_per_year * df for df in degradation_factors)
-
-                # Calculate energy not covered over the project lifetime
-                lifetime_uncovered_energy_kwh = total_consumption_lifetime - lifetime_used_energy_kwh
-
-                # Calculate number of battery replacements
-                number_of_battery_replacements = max(0, int((project_lifetime - 1) // battery_lifespan))
-
-                # Calculate replacement costs
-                battery_replacement_cost = number_of_battery_replacements * (batteries_mwh * battery_cost_per_mwh)
-
-                # Calculate initial CAPEX components
-                panel_cost = panels_mwp * panel_cost_per_mwp
-                battery_cost = batteries_mwh * battery_cost_per_mwh
-                installation_cost = panels_mwp * installation_cost_per_mwp
-
-                # Total initial CAPEX
-                initial_capex = panel_cost + battery_cost + installation_cost
-
-                total_capex = initial_capex + battery_replacement_cost
-
-                # Calculate OPEX components
-                panel_maintenance_cost = maintenance_cost_per_mwp * panels_mwp * project_lifetime
-                battery_maintenance_cost = maintenance_cost_per_mwh_battery * batteries_mwh * project_lifetime
-
-                opex = panel_maintenance_cost + battery_maintenance_cost
-
-                total_cost = total_capex + opex
-
-                # Calculate revenue from energy sales
-                revenue_from_sales = total_excess_energy_kwh * sell_price
-
-                # Calculate grid energy costs without solar installation
-                grid_cost_without_solar = total_consumption_lifetime * electricity_price
-
-                # Calculate remaining grid energy costs with solar installation
-                grid_cost_with_solar = lifetime_uncovered_energy_kwh * electricity_price
-
-                # Calculate total cost with solar installation (CAPEX + OPEX + remaining grid energy costs)
-                total_cost_with_solar = total_cost + grid_cost_with_solar
-
-                # Calculate net savings by considering revenue from sales
-                net_savings = grid_cost_without_solar - (total_cost_with_solar - revenue_from_sales)
-
-                # Determine if the installation saves money
-                saves_money = net_savings > 0
-
-                # Store the configuration
-                config = {
-                    'panels_mwp': panels_mwp,
-                    'batteries_mwh': batteries_mwh,
-                    'portion_covered': portion_covered,
-                    'portion_not_covered': 100 - portion_covered,
-                    'total_cost': total_cost,
-                    'total_capex': total_capex,
-                    'opex': opex,
-                    'project_lifetime': project_lifetime,
-                    'tcoe': (total_cost - revenue_from_sales) / lifetime_used_energy_kwh if lifetime_used_energy_kwh > 0 else float('inf'),
-                    'net_savings': net_savings,
-                    'revenue_from_sales': revenue_from_sales,
-                    'saves_money': saves_money,
-                    'cost_breakdown': {
-                        'Panel Cost': panel_cost,
-                        'Battery Cost': battery_cost,
-                        'Installation Cost': installation_cost,
-                        'Battery Replacement Cost': battery_replacement_cost,
-                        'Panel Maintenance Cost': panel_maintenance_cost,
-                        'Battery Maintenance Cost': battery_maintenance_cost,
-                        'Remaining Grid Energy Cost': grid_cost_with_solar,
-                        'Revenue from Energy Sales': revenue_from_sales,
-                    }
-                }
-                configurations.append(config)
-
-            # Update progress bar in every iteration
-            current_iteration += 1
-            progress_bar.progress(min(current_iteration / total_iterations, 1.0))
-
-    progress_bar.progress(1.0)
-
-    # Phase 2: Fine Search
-    if configurations:
-        # Sort configurations by net_savings in descending order
-        sorted_configurations = sorted(configurations, key=lambda x: x['net_savings'], reverse=True)
-
-        # Select the top configuration with maximum net savings
-        top_configuration = sorted_configurations[0]
-
-        st.write("🔍 **Phase 2: Fine Search**")
-        fine_configurations = []
-
-        # Fine Step Sizes
-        fine_step_size_mwp = coarse_step_size_mwp / 10
-        fine_step_size_mwh = coarse_step_size_mwh / 10
-
-        # Ensure fine step sizes are not zero
-        fine_step_size_mwp = max(fine_step_size_mwp, 0.01)
-        fine_step_size_mwh = max(fine_step_size_mwh, 0.01)
-
-        # Define fine search ranges around the top configuration
-        panels_mwp_center = top_configuration['panels_mwp']
-        batteries_mwh_center = top_configuration['batteries_mwh']
-
-        panels_mwp_min = max(0.0, panels_mwp_center - coarse_step_size_mwp)
-        panels_mwp_max = panels_mwp_center + coarse_step_size_mwp
-        battery_mwh_min = max(0.0, batteries_mwh_center - coarse_step_size_mwh)
-        battery_mwh_max = batteries_mwh_center + coarse_step_size_mwh
-
-        # Generate fine search arrays
-        panel_sizes_mwp_fine = np.arange(panels_mwp_min, panels_mwp_max + fine_step_size_mwp, fine_step_size_mwp)
-        battery_sizes_mwh_fine = np.arange(battery_mwh_min, battery_mwh_max + fine_step_size_mwh, fine_step_size_mwh)
-
-        total_iterations_fine = len(panel_sizes_mwp_fine) * len(battery_sizes_mwh_fine)
-        current_iteration_fine = 0
-        progress_bar_fine = st.progress(0)
-
-        for panels_mwp in panel_sizes_mwp_fine:
-            panel_area_m2 = (panels_mwp * 1e6) / wp_per_m2  # Convert MWp to m²
-            module_efficiency = wp_per_m2 / 1000  # Convert Wp/m² to kW/m²
-
-            # Precompute solar production for all hours
-            solar_production = (panel_area_m2 * irradiation_array * module_efficiency) * (1 - system_loss / 100)
-
-            for batteries_mwh in battery_sizes_mwh_fine:
+        if use_batteries:
+            for batteries_mwh in battery_sizes_mwh_coarse:
                 # Define min and max battery states
                 min_battery_state = batteries_mwh * 1000 * min_state_of_charge  # kWh
                 max_battery_state = batteries_mwh * 1000  # kWh
@@ -468,11 +293,427 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                             'Revenue from Energy Sales': revenue_from_sales,
                         }
                     }
-                    fine_configurations.append(config)
+                    configurations.append(config)
 
                 # Update progress bar in every iteration
-                current_iteration_fine += 1
-                progress_bar_fine.progress(min(current_iteration_fine / total_iterations_fine, 1.0))
+                current_iteration += 1
+                progress_bar.progress(min(current_iteration / total_iterations, 1.0))
+        else:
+            # When not using batteries, set batteries_mwh to 0
+            panels_mwp_fixed = panels_mwp
+            batteries_mwh = 0.0
+            covered_by_panels = 0
+            not_covered = 0
+
+            # Initialize total excess energy for this configuration
+            total_excess_energy_kwh = 0.0  # Define it here to prevent NameError
+
+            for hour in range(len(load_curve)):
+                production = solar_production[hour]
+                consumption = load_curve[hour]
+
+                if production >= consumption:
+                    surplus = production - consumption
+
+                    # Since batteries are not used, all surplus can be sold to the grid
+                    total_excess_energy_kwh += surplus
+                    covered_by_panels += consumption
+                else:
+                    deficit = consumption - production
+
+                    # All deficit must be covered by the grid
+                    not_covered += deficit
+                    covered_by_panels += production
+
+            # Calculate the portion covered
+            total_consumption = sum(load_curve)
+            portion_covered = (covered_by_panels / total_consumption) * 100
+
+            # Calculate the total energy used per year
+            total_used_energy_per_year = covered_by_panels / total_years
+
+            # Adjust total used energy for the project lifetime and degradation
+            degradation_factors = [(1 - panel_degradation_rate) ** year for year in range(project_lifetime)]
+            lifetime_used_energy_kwh = sum(total_used_energy_per_year * df for df in degradation_factors)
+
+            # Calculate energy not covered over the project lifetime
+            lifetime_uncovered_energy_kwh = total_consumption_lifetime - lifetime_used_energy_kwh
+
+            # Calculate initial CAPEX components
+            panel_cost = panels_mwp * panel_cost_per_mwp
+            battery_cost = 0.0
+            installation_cost = panels_mwp * installation_cost_per_mwp
+
+            # Total initial CAPEX
+            initial_capex = panel_cost + battery_cost + installation_cost
+
+            total_capex = initial_capex  # No battery replacement cost
+
+            # Calculate OPEX components
+            panel_maintenance_cost = maintenance_cost_per_mwp * panels_mwp * project_lifetime
+            battery_maintenance_cost = 0.0  # No battery maintenance
+
+            opex = panel_maintenance_cost + battery_maintenance_cost
+
+            total_cost = total_capex + opex
+
+            # Calculate revenue from energy sales
+            revenue_from_sales = total_excess_energy_kwh * sell_price
+
+            # Calculate grid energy costs without solar installation
+            grid_cost_without_solar = total_consumption_lifetime * electricity_price
+
+            # Calculate remaining grid energy costs with solar installation
+            grid_cost_with_solar = lifetime_uncovered_energy_kwh * electricity_price
+
+            # Calculate total cost with solar installation (CAPEX + OPEX + remaining grid energy costs)
+            total_cost_with_solar = total_cost + grid_cost_with_solar
+
+            # Calculate net savings by considering revenue from sales
+            net_savings = grid_cost_without_solar - (total_cost_with_solar - revenue_from_sales)
+
+            # Determine if the installation saves money
+            saves_money = net_savings > 0
+
+            # Store the configuration
+            config = {
+                'panels_mwp': panels_mwp,
+                'batteries_mwh': batteries_mwh,
+                'portion_covered': portion_covered,
+                'portion_not_covered': 100 - portion_covered,
+                'total_cost': total_cost,
+                'total_capex': total_capex,
+                'opex': opex,
+                'project_lifetime': project_lifetime,
+                'tcoe': (total_cost - revenue_from_sales) / lifetime_used_energy_kwh if lifetime_used_energy_kwh > 0 else float('inf'),
+                'net_savings': net_savings,
+                'revenue_from_sales': revenue_from_sales,
+                'saves_money': saves_money,
+                'cost_breakdown': {
+                    'Panel Cost': panel_cost,
+                    'Battery Cost': battery_cost,
+                    'Installation Cost': installation_cost,
+                    'Battery Replacement Cost': 0.0,
+                    'Panel Maintenance Cost': panel_maintenance_cost,
+                    'Battery Maintenance Cost': battery_maintenance_cost,
+                    'Remaining Grid Energy Cost': grid_cost_with_solar,
+                    'Revenue from Energy Sales': revenue_from_sales,
+                }
+            }
+            configurations.append(config)
+
+            # Update progress bar in every iteration
+            current_iteration += 1
+            progress_bar.progress(min(current_iteration / total_iterations, 1.0))
+
+    progress_bar.progress(1.0)
+
+    # Phase 2: Fine Search
+    if configurations:
+        # Sort configurations by net_savings in descending order
+        sorted_configurations = sorted(configurations, key=lambda x: x['net_savings'], reverse=True)
+
+        # Select the top configuration with maximum net savings
+        top_configuration = sorted_configurations[0]
+
+        st.write("🔍 **Phase 2: Fine Search**")
+        fine_configurations = []
+
+        if use_batteries:
+            # Fine Step Sizes
+            fine_step_size_mwp = coarse_step_size_mwp / 10
+            fine_step_size_mwh = coarse_step_size_mwh / 10
+
+            # Ensure fine step sizes are not zero
+            fine_step_size_mwp = max(fine_step_size_mwp, 0.01)
+            fine_step_size_mwh = max(fine_step_size_mwh, 0.01)
+
+            # Define fine search ranges around the top configuration
+            panels_mwp_center = top_configuration['panels_mwp']
+            batteries_mwh_center = top_configuration['batteries_mwh']
+
+            panels_mwp_min = max(0.0, panels_mwp_center - coarse_step_size_mwp)
+            panels_mwp_max = panels_mwp_center + coarse_step_size_mwp
+            battery_mwh_min = max(0.0, batteries_mwh_center - coarse_step_size_mwh)
+            battery_mwh_max = batteries_mwh_center + coarse_step_size_mwh
+
+            # Generate fine search arrays
+            panel_sizes_mwp_fine = np.arange(panels_mwp_min, panels_mwp_max + fine_step_size_mwp, fine_step_size_mwp)
+            battery_sizes_mwh_fine = np.arange(battery_mwh_min, battery_mwh_max + fine_step_size_mwh, fine_step_size_mwh)
+
+            total_iterations_fine = len(panel_sizes_mwp_fine) * len(battery_sizes_mwh_fine)
+        else:
+            # If not using batteries, only fine-tune panels
+            fine_step_size_mwp = coarse_step_size_mwp / 10
+            fine_step_size_mwp = max(fine_step_size_mwp, 0.01)
+
+            panels_mwp_center = top_configuration['panels_mwp']
+
+            panels_mwp_min = max(0.0, panels_mwp_center - coarse_step_size_mwp)
+            panels_mwp_max = panels_mwp_center + coarse_step_size_mwp
+
+            panel_sizes_mwp_fine = np.arange(panels_mwp_min, panels_mwp_max + fine_step_size_mwp, fine_step_size_mwp)
+            battery_sizes_mwh_fine = [0.0]  # Fixed at 0
+
+            total_iterations_fine = len(panel_sizes_mwp_fine)
+
+        current_iteration_fine = 0
+        progress_bar_fine = st.progress(0)
+
+        for panels_mwp in panel_sizes_mwp_fine:
+            panel_area_m2 = (panels_mwp * 1e6) / wp_per_m2  # Convert MWp to m²
+            module_efficiency = wp_per_m2 / 1000  # Convert Wp/m² to kW/m²
+
+            # Precompute solar production for all hours
+            solar_production = (panel_area_m2 * irradiation_array * module_efficiency) * (1 - system_loss / 100)
+
+            if use_batteries:
+                for batteries_mwh in battery_sizes_mwh_fine:
+                    # Define min and max battery states
+                    min_battery_state = batteries_mwh * 1000 * min_state_of_charge  # kWh
+                    max_battery_state = batteries_mwh * 1000  # kWh
+
+                    battery_state = max_battery_state  # Start at full charge
+
+                    covered_by_panels = 0
+                    covered_by_batteries = 0
+                    not_covered = 0
+
+                    # Initialize total excess energy for this configuration
+                    total_excess_energy_kwh = 0
+
+                    for hour in range(len(load_curve)):
+                        production = solar_production[hour]
+                        consumption = load_curve[hour]
+
+                        if production >= consumption:
+                            surplus = production - consumption
+
+                            # Charge the battery with surplus energy
+                            available_storage = max_battery_state - battery_state
+                            energy_to_store = min(surplus, available_storage)
+                            battery_state += energy_to_store
+
+                            covered_by_panels += consumption
+
+                            # Sell excess energy to the grid if any
+                            excess_energy = surplus - energy_to_store
+                            if excess_energy > 0:
+                                total_excess_energy_kwh += excess_energy
+                        else:
+                            deficit = consumption - production
+
+                            # Discharge the battery to cover the deficit
+                            available_energy = battery_state - min_battery_state
+                            energy_from_battery = min(available_energy, deficit)
+                            battery_state -= energy_from_battery
+                            covered_by_batteries += energy_from_battery
+
+                            uncovered_energy = deficit - energy_from_battery
+                            not_covered += uncovered_energy
+
+                            covered_by_panels += production
+
+                        # Check if battery state exceeds capacity or goes below min SOC
+                        if battery_state > max_battery_state + 1e-6 or battery_state < min_battery_state - 1e-6:
+                            break  # Invalid battery state, skip to next configuration
+
+                    else:
+                        # Completed all hours without invalid battery state
+                        total_consumption = sum(load_curve)
+                        portion_covered = ((covered_by_panels + covered_by_batteries) / total_consumption) * 100
+
+                        # Since we're removing target coverage, we don't skip based on coverage
+                        # Instead, collect all configurations
+
+                        # Calculate the total energy used per year
+                        total_used_energy_per_year = (covered_by_panels + covered_by_batteries) / total_years
+
+                        # Adjust total used energy for the project lifetime and degradation
+                        degradation_factors = [(1 - panel_degradation_rate) ** year for year in range(project_lifetime)]
+                        lifetime_used_energy_kwh = sum(total_used_energy_per_year * df for df in degradation_factors)
+
+                        # Calculate energy not covered over the project lifetime
+                        lifetime_uncovered_energy_kwh = total_consumption_lifetime - lifetime_used_energy_kwh
+
+                        # Calculate number of battery replacements
+                        number_of_battery_replacements = max(0, int((project_lifetime - 1) // battery_lifespan))
+
+                        # Calculate replacement costs
+                        battery_replacement_cost = number_of_battery_replacements * (batteries_mwh * battery_cost_per_mwh)
+
+                        # Calculate initial CAPEX components
+                        panel_cost = panels_mwp * panel_cost_per_mwp
+                        battery_cost = batteries_mwh * battery_cost_per_mwh
+                        installation_cost = panels_mwp * installation_cost_per_mwp
+
+                        # Total initial CAPEX
+                        initial_capex = panel_cost + battery_cost + installation_cost
+
+                        total_capex = initial_capex + battery_replacement_cost
+
+                        # Calculate OPEX components
+                        panel_maintenance_cost = maintenance_cost_per_mwp * panels_mwp * project_lifetime
+                        battery_maintenance_cost = maintenance_cost_per_mwh_battery * batteries_mwh * project_lifetime
+
+                        opex = panel_maintenance_cost + battery_maintenance_cost
+
+                        total_cost = total_capex + opex
+
+                        # Calculate revenue from energy sales
+                        revenue_from_sales = total_excess_energy_kwh * sell_price
+
+                        # Calculate grid energy costs without solar installation
+                        grid_cost_without_solar = total_consumption_lifetime * electricity_price
+
+                        # Calculate remaining grid energy costs with solar installation
+                        grid_cost_with_solar = lifetime_uncovered_energy_kwh * electricity_price
+
+                        # Calculate total cost with solar installation (CAPEX + OPEX + remaining grid energy costs)
+                        total_cost_with_solar = total_cost + grid_cost_with_solar
+
+                        # Calculate net savings by considering revenue from sales
+                        net_savings = grid_cost_without_solar - (total_cost_with_solar - revenue_from_sales)
+
+                        # Determine if the installation saves money
+                        saves_money = net_savings > 0
+
+                        # Store the configuration
+                        config = {
+                            'panels_mwp': panels_mwp,
+                            'batteries_mwh': batteries_mwh,
+                            'portion_covered': portion_covered,
+                            'portion_not_covered': 100 - portion_covered,
+                            'total_cost': total_cost,
+                            'total_capex': total_capex,
+                            'opex': opex,
+                            'project_lifetime': project_lifetime,
+                            'tcoe': (total_cost - revenue_from_sales) / lifetime_used_energy_kwh if lifetime_used_energy_kwh > 0 else float('inf'),
+                            'net_savings': net_savings,
+                            'revenue_from_sales': revenue_from_sales,
+                            'saves_money': saves_money,
+                            'cost_breakdown': {
+                                'Panel Cost': panel_cost,
+                                'Battery Cost': battery_cost,
+                                'Installation Cost': installation_cost,
+                                'Battery Replacement Cost': battery_replacement_cost,
+                                'Panel Maintenance Cost': panel_maintenance_cost,
+                                'Battery Maintenance Cost': battery_maintenance_cost,
+                                'Remaining Grid Energy Cost': grid_cost_with_solar,
+                                'Revenue from Energy Sales': revenue_from_sales,
+                            }
+                        }
+                        fine_configurations.append(config)
+
+                    # Update progress bar in every iteration
+                    current_iteration_fine += 1
+                    progress_bar_fine.progress(min(current_iteration_fine / total_iterations_fine, 1.0))
+            else:
+                # When not using batteries, set batteries_mwh to 0
+                batteries_mwh = 0.0
+                covered_by_panels = 0
+                not_covered = 0
+
+                # Initialize total excess energy for this configuration
+                total_excess_energy_kwh = 0.0  # Initialize here to prevent NameError
+
+                for hour in range(len(load_curve)):
+                    production = solar_production[hour]
+                    consumption = load_curve[hour]
+
+                    if production >= consumption:
+                        surplus = production - consumption
+
+                        # Since batteries are not used, all surplus can be sold to the grid
+                        total_excess_energy_kwh += surplus
+                        covered_by_panels += consumption
+                    else:
+                        deficit = consumption - production
+
+                        # All deficit must be covered by the grid
+                        not_covered += deficit
+                        covered_by_panels += production
+
+                # Calculate the portion covered
+                total_consumption = sum(load_curve)
+                portion_covered = (covered_by_panels / total_consumption) * 100
+
+                # Calculate the total energy used per year
+                total_used_energy_per_year = covered_by_panels / total_years
+
+                # Adjust total used energy for the project lifetime and degradation
+                degradation_factors = [(1 - panel_degradation_rate) ** year for year in range(project_lifetime)]
+                lifetime_used_energy_kwh = sum(total_used_energy_per_year * df for df in degradation_factors)
+
+                # Calculate energy not covered over the project lifetime
+                lifetime_uncovered_energy_kwh = total_consumption_lifetime - lifetime_used_energy_kwh
+
+                # Calculate initial CAPEX components
+                panel_cost = panels_mwp * panel_cost_per_mwp
+                battery_cost = 0.0
+                installation_cost = panels_mwp * installation_cost_per_mwp
+
+                # Total initial CAPEX
+                initial_capex = panel_cost + battery_cost + installation_cost
+
+                total_capex = initial_capex  # No battery replacement cost
+
+                # Calculate OPEX components
+                panel_maintenance_cost = maintenance_cost_per_mwp * panels_mwp * project_lifetime
+                battery_maintenance_cost = 0.0  # No battery maintenance
+
+                opex = panel_maintenance_cost + battery_maintenance_cost
+
+                total_cost = total_capex + opex
+
+                # Calculate revenue from energy sales
+                revenue_from_sales = total_excess_energy_kwh * sell_price
+
+                # Calculate grid energy costs without solar installation
+                grid_cost_without_solar = total_consumption_lifetime * electricity_price
+
+                # Calculate remaining grid energy costs with solar installation
+                grid_cost_with_solar = lifetime_uncovered_energy_kwh * electricity_price
+
+                # Calculate total cost with solar installation (CAPEX + OPEX + remaining grid energy costs)
+                total_cost_with_solar = total_cost + grid_cost_with_solar
+
+                # Calculate net savings by considering revenue from sales
+                net_savings = grid_cost_without_solar - (total_cost_with_solar - revenue_from_sales)
+
+                # Determine if the installation saves money
+                saves_money = net_savings > 0
+
+                # Store the configuration
+                config = {
+                    'panels_mwp': panels_mwp,
+                    'batteries_mwh': batteries_mwh,
+                    'portion_covered': portion_covered,
+                    'portion_not_covered': 100 - portion_covered,
+                    'total_cost': total_cost,
+                    'total_capex': total_capex,
+                    'opex': opex,
+                    'project_lifetime': project_lifetime,
+                    'tcoe': (total_cost - revenue_from_sales) / lifetime_used_energy_kwh if lifetime_used_energy_kwh > 0 else float('inf'),
+                    'net_savings': net_savings,
+                    'revenue_from_sales': revenue_from_sales,
+                    'saves_money': saves_money,
+                    'cost_breakdown': {
+                        'Panel Cost': panel_cost,
+                        'Battery Cost': battery_cost,
+                        'Installation Cost': installation_cost,
+                        'Battery Replacement Cost': 0.0,
+                        'Panel Maintenance Cost': panel_maintenance_cost,
+                        'Battery Maintenance Cost': battery_maintenance_cost,
+                        'Remaining Grid Energy Cost': grid_cost_with_solar,
+                        'Revenue from Energy Sales': revenue_from_sales,
+                    }
+                }
+                fine_configurations.append(config)
+
+                # Update progress bar in every iteration
+                current_iteration += 1
+                progress_bar.progress(min(current_iteration / total_iterations, 1.0))
 
         # Ensure the progress bar reaches 100% at the end of fine search
         progress_bar_fine.progress(1.0)
@@ -509,6 +750,10 @@ system_loss = st.sidebar.number_input("⚙️ System Loss (%)", value=14.0, min_
 start_year = st.sidebar.number_input("📅 Start Year", min_value=2005, max_value=2023, value=2020)
 end_year = st.sidebar.number_input("📅 End Year", min_value=2005, max_value=2023, value=2020)
 
+# Ensure Start Year <= End Year
+if start_year > end_year:
+    st.sidebar.error("❗ Start Year must be less than or equal to End Year.")
+
 # Project Lifetime
 project_lifetime = st.sidebar.number_input("⏳ Project Lifetime (years)", value=15, min_value=1)
 
@@ -517,20 +762,84 @@ wp_per_m2 = st.sidebar.number_input("🔋 Panel Efficiency (Wp/m²)", value=200,
 
 # Energy Consumption Input
 st.sidebar.header("🔌 Energy Consumption")
-total_yearly_consumption = st.sidebar.number_input("📈 Total Yearly Consumption (kWh/year)", value=1000000, min_value=1)
 
-# Cost Parameters
-st.sidebar.header("💰 Cost Parameters")
+# **New Addition: Load Curve Upload**
+st.sidebar.subheader("📂 Upload Load Curve Excel File (Optional)")
+uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx"])
+
+if uploaded_file is not None:
+    try:
+        # Read the Excel file
+        load_data = pd.read_excel(uploaded_file)
+
+        # Validate required columns
+        required_columns = ['Date', 'Hour', 'Consumption']
+        if not all(col in load_data.columns for col in required_columns):
+            st.sidebar.error(f"❗ The uploaded file must contain the following columns: {', '.join(required_columns)}.")
+            load_curve = None
+            total_yearly_consumption = None
+        else:
+            # Convert 'Date' and 'Hour' to datetime if necessary
+            load_data['Date'] = pd.to_datetime(load_data['Date'], errors='coerce')
+            if load_data['Date'].isnull().any():
+                st.sidebar.error("❗ Some dates in the 'Date' column could not be parsed. Please check the file format.")
+                load_curve = None
+                total_yearly_consumption = None
+            else:
+                # Ensure 'Hour' is integer and between 0-23
+                if not np.issubdtype(load_data['Hour'].dtype, np.integer):
+                    load_data['Hour'] = load_data['Hour'].astype(int)
+                if load_data['Hour'].min() < 0 or load_data['Hour'].max() > 23:
+                    st.sidebar.error("❗ The 'Hour' column must contain values between 0 and 23.")
+                    load_curve = None
+                    total_yearly_consumption = None
+                else:
+                    # Sort data by date and hour
+                    load_data = load_data.sort_values(by=['Date', 'Hour'])
+
+                    # Extract the consumption values
+                    load_curve = load_data['Consumption'].tolist()
+
+                    # Calculate total yearly consumption
+                    total_yearly_consumption = sum(load_curve)
+
+                    st.sidebar.success("✅ Load curve successfully uploaded and processed.")
+    except Exception as e:
+        st.sidebar.error(f"❗ An error occurred while processing the file: {e}")
+        load_curve = None
+        total_yearly_consumption = None
+else:
+    # If no file is uploaded, allow user to input total yearly consumption
+    total_yearly_consumption = st.sidebar.number_input("📈 Total Yearly Consumption (kWh/year)", value=1000000, min_value=1)
+
+# Checkbox to include batteries
+include_batteries = st.sidebar.checkbox("🔋 Include Batteries in the Project", value=True)
+
+if include_batteries:
+    st.sidebar.header("🔋 Battery Parameters")
+    # Cost Parameters for Batteries
+    st.sidebar.subheader("💰 Cost Parameters for Batteries")
+    battery_cost_per_mwh = st.sidebar.number_input("🔋 Battery Cost (€/MWh)", value=130000.0, min_value=0.0)
+    maintenance_cost_per_mwh_battery = st.sidebar.number_input("🛠️ Battery Maintenance Cost (€/MWh/year)", value=5000.0, min_value=0.0)
+    battery_lifespan = st.sidebar.number_input("🔋 Battery Lifespan (years)", value=15, min_value=1)
+    min_state_of_charge = st.sidebar.number_input("🔋 Minimum State of Charge (%)", value=20.0, min_value=0.0,
+                                                  max_value=100.0) / 100
+else:
+    # Set default battery-related parameters to zero or None
+    battery_cost_per_mwh = 0.0
+    maintenance_cost_per_mwh_battery = 0.0
+    battery_lifespan = 1  # To avoid division by zero
+    min_state_of_charge = 0.0
+
+# Cost Parameters for Panels and Installation
+st.sidebar.header("💰 Cost Parameters for Panels and Installation")
 panel_cost_per_mwp = st.sidebar.number_input("🔆 Panel Cost (€/MWp)", value=115000.0, min_value=0.0)
-battery_cost_per_mwh = st.sidebar.number_input("🔋 Battery Cost (€/MWh)", value=130000.0, min_value=0.0)
 installation_cost_per_mwp = st.sidebar.number_input("⚙️ Installation Cost (€/MWp)", value=800000.0, min_value=0.0)
 maintenance_cost_per_mwp = st.sidebar.number_input("🛠️ Panel Maintenance Cost (€/MWp/year)", value=8000.0, min_value=0.0)
-maintenance_cost_per_mwh_battery = st.sidebar.number_input("🛠️ Battery Maintenance Cost (€/MWh/year)", value=5000.0, min_value=0.0)
-battery_lifespan = st.sidebar.number_input("🔋 Battery Lifespan (years)", value=15, min_value=1)
+
+# Panel Degradation Rate
 panel_degradation_rate = st.sidebar.number_input("📉 Panel Degradation Rate (% per year)", value=0.5,
                                                  min_value=0.0, max_value=100.0) / 100
-min_state_of_charge = st.sidebar.number_input("🔋 Minimum State of Charge (%)", value=20.0, min_value=0.0,
-                                              max_value=100.0) / 100
 
 # Electricity Price Input
 st.sidebar.header("💡 Electricity Price")
@@ -550,6 +859,17 @@ day_start = st.sidebar.number_input("📅 Select start day for plot (1-365)", mi
 # Calculate Button
 if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is not None:
     with st.spinner('📊 Fetching data and performing optimization...'):
+        # Determine how to obtain the load curve
+        if uploaded_file is not None and load_curve is not None:
+            # Use the uploaded load curve
+            st.write("📂 **Using Uploaded Load Curve Data**")
+        else:
+            # Generate a fictional load curve based on user input
+            st.write("📈 **Generating Fictional Load Curve**")
+            load_curve = generate_fictional_load_curve(len(hourly_data) if 'hourly_data' in locals() and hourly_data else 8760, total_yearly_consumption)
+
+        # Fetch equivalent production hours
+        # Note: The installed_capacity_kw parameter is not used in the current function
         result = get_equivalent_production_hours(latitude, longitude, 1000, system_loss, start_year, end_year)
         if result:
             equivalent_production_hours = result['equivalent_production_hours']
@@ -559,9 +879,10 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
             hourly_df = pd.DataFrame(hourly_data)
             hourly_df['time'] = pd.to_datetime(hourly_df['time'], format='%Y%m%d:%H%M')
 
-            # Generate the load curve for the entire period
-            total_hours = len(hourly_data)
-            load_curve = generate_fictional_load_curve(total_hours, total_yearly_consumption)
+            # If load_curve was generated fictionally and depends on hourly_data length
+            if uploaded_file is None or load_curve is None:
+                total_hours = len(hourly_data)
+                load_curve = generate_fictional_load_curve(total_hours, total_yearly_consumption)
 
             # Initialize progress bars for coarse and fine search
             progress_bar = st.progress(0)
@@ -585,7 +906,8 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                 min_state_of_charge,
                 electricity_price,
                 sell_price,
-                progress_bar
+                progress_bar,
+                use_batteries=include_batteries  # Pass the checkbox state
             )
 
             if optimal_configurations:
@@ -597,7 +919,10 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                 for idx, config in enumerate(optimal_configurations):
                     st.subheader(f"#### Configuration {idx + 1}")
                     st.markdown(f"- **Solar Panel Capacity**: {config['panels_mwp']:.2f} MWp")
-                    st.markdown(f"- **Battery Capacity**: {config['batteries_mwh']:.2f} MWh")
+                    if include_batteries:
+                        st.markdown(f"- **Battery Capacity**: {config['batteries_mwh']:.2f} MWh")
+                    else:
+                        st.markdown(f"- **Battery Capacity**: Not Included")
                     st.markdown(f"- **Portion of Consumption Covered**: {config['portion_covered']:.2f}%")
                     st.markdown(f"- **Total CAPEX**: €{config['total_capex']:,.2f}")
                     st.markdown(f"- **Total Cost of Energy (TCOE)**: €{config['tcoe']:.4f}/kWh")
@@ -642,38 +967,54 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                 solar_production = (panel_area_m2 * irradiation_array * module_efficiency) * (1 - system_loss / 100)
 
                 # Simulate battery state over the entire period for the best configuration
-                min_battery_state = batteries_mwh * 1000 * min_state_of_charge  # kWh
-                max_battery_state = batteries_mwh * 1000  # kWh
-                battery_state = max_battery_state  # Start at full charge
-                battery_state_over_time = []
-                total_excess_energy_kwh = 0  # Initialize total excess energy
+                if include_batteries and batteries_mwh > 0:
+                    min_battery_state = batteries_mwh * 1000 * min_state_of_charge  # kWh
+                    max_battery_state = batteries_mwh * 1000  # kWh
+                    battery_state = max_battery_state  # Start at full charge
+                    battery_state_over_time = []
+                    total_excess_energy_kwh = 0  # Initialize total excess energy
 
-                for hour in range(len(load_curve)):
-                    production = solar_production[hour]  # kWh
-                    consumption = load_curve[hour]
+                    for hour in range(len(load_curve)):
+                        production = solar_production[hour]  # kWh
+                        consumption = load_curve[hour]
 
-                    if production >= consumption:
-                        surplus = production - consumption
+                        if production >= consumption:
+                            surplus = production - consumption
 
-                        # Charge the battery with surplus energy
-                        available_storage = max_battery_state - battery_state
-                        energy_to_store = min(surplus, available_storage)
-                        battery_state += energy_to_store
+                            # Charge the battery with surplus energy
+                            available_storage = max_battery_state - battery_state
+                            energy_to_store = min(surplus, available_storage)
+                            battery_state += energy_to_store
 
-                        # Sell excess energy to the grid if any
-                        excess_energy = surplus - energy_to_store
-                        if excess_energy > 0:
-                            total_excess_energy_kwh += excess_energy
-                    else:
-                        deficit = consumption - production
+                            # Sell excess energy to the grid if any
+                            excess_energy = surplus - energy_to_store
+                            if excess_energy > 0:
+                                total_excess_energy_kwh += excess_energy
+                        else:
+                            deficit = consumption - production
 
-                        # Discharge the battery to cover the deficit
-                        available_energy = battery_state - min_battery_state
-                        energy_from_battery = min(available_energy, deficit)
-                        battery_state -= energy_from_battery
+                            # Discharge the battery to cover the deficit
+                            available_energy = battery_state - min_battery_state
+                            energy_from_battery = min(available_energy, deficit)
+                            battery_state -= energy_from_battery
 
-                    # Append current battery state to battery_state_over_time
-                    battery_state_over_time.append(battery_state)
+                        # Append current battery state to battery_state_over_time
+                        battery_state_over_time.append(battery_state)
+                else:
+                    # If not using batteries, set battery state to zero
+                    battery_state_over_time = [0] * len(load_curve)
+                    total_excess_energy_kwh = 0.0  # Initialize here to prevent NameError
+
+                    for hour in range(len(load_curve)):
+                        production = solar_production[hour]  # kWh
+                        consumption = load_curve[hour]
+
+                        if production >= consumption:
+                            surplus = production - consumption
+
+                            # Since batteries are not used, all surplus can be sold to the grid
+                            total_excess_energy_kwh += surplus
+                        # No battery to handle deficits
 
                 # Calculate total revenue from energy sales
                 total_revenue = total_excess_energy_kwh * sell_price
@@ -694,14 +1035,31 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                     battery_state_filtered = battery_state_over_time[start_hour:end_hour]
 
                     # Plot the profiles
-                    fig, ax = plt.subplots(figsize=(12, 6))
-                    ax.plot(load_curve_filtered, label='Load (kW)', color='blue')
-                    ax.plot(solar_production_filtered, label='Solar Production (kWh)', color='orange')
-                    ax.plot(battery_state_filtered, label='Battery State (kWh)', color='green')
-                    ax.set_xlabel('Hour')
-                    ax.set_ylabel('Energy')
-                    ax.set_title('Profile of Load, Solar Production, and Battery State')
-                    ax.legend()
+                    fig, ax1 = plt.subplots(figsize=(12, 6))
+
+                    color = 'tab:blue'
+                    ax1.set_xlabel('Hour')
+                    ax1.set_ylabel('Load (kW)', color=color)
+                    ax1.plot(load_curve_filtered, label='Load (kW)', color=color)
+                    ax1.tick_params(axis='y', labelcolor=color)
+
+                    ax2 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
+
+                    color = 'tab:orange'
+                    ax2.set_ylabel('Solar Production (kWh)', color=color)  # we already handled the x-label with ax1
+                    ax2.plot(solar_production_filtered, label='Solar Production (kWh)', color=color)
+                    ax2.tick_params(axis='y', labelcolor=color)
+
+                    if include_batteries and batteries_mwh > 0:
+                        ax3 = ax1.twinx()  # instantiate a third axes that shares the same x-axis
+                        ax3.spines['right'].set_position(('outward', 60))  # Offset the third y-axis
+                        color = 'tab:green'
+                        ax3.set_ylabel('Battery State (kWh)', color=color)
+                        ax3.plot(battery_state_filtered, label='Battery State (kWh)', color=color)
+                        ax3.tick_params(axis='y', labelcolor=color)
+
+                    fig.tight_layout()  # otherwise the right y-label is slightly clipped
+                    plt.title('Profile of Load, Solar Production, and Battery State')
                     st.pyplot(fig)
                 else:
                     st.warning("⚠️ Selected period for plotting has no data.")

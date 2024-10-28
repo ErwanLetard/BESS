@@ -1,6 +1,7 @@
 import requests
 import streamlit as st
 import numpy as np
+import numpy_financial as npf  # Import numpy_financial
 import pandas as pd
 import matplotlib.pyplot as plt
 from io import BytesIO
@@ -99,7 +100,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                                   maintenance_cost_per_mwp,
                                   maintenance_cost_per_mwh_battery, battery_lifespan,
                                   panel_degradation_rate, min_state_of_charge, electricity_price, sell_price, progress_bar,
-                                  use_batteries=True):
+                                  inflation_rate, target_irr, use_batteries=True):
     configurations = []
 
     total_years = end_year - start_year + 1
@@ -121,8 +122,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
     max_solar_capacity_mwp = max((average_load_kw / 1000) * 10, 0.1)  # Scale factor of 10
 
     # Coarse Step Size for Panels (MWp) based on total yearly consumption
-    coarse_step_size_mwp = max_solar_capacity_mwp / 10  # 10% of max capacity
-    coarse_step_size_mwp = max(coarse_step_size_mwp, 0.1)  # Ensure a minimum step size
+    coarse_step_size_mwp = max(max_solar_capacity_mwp / 10, 0.1)  # 10% of max capacity, ensure minimum 0.1
 
     if use_batteries:
         # Average Daily Consumption (kWh)
@@ -132,8 +132,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
         max_battery_capacity_mwh = (average_daily_consumption_kwh * 2) / 1000  # Convert kWh to MWh
 
         # Coarse Step Size for Batteries (MWh) based on total yearly consumption
-        coarse_step_size_mwh = max_battery_capacity_mwh / 10  # 10% of max capacity
-        coarse_step_size_mwh = max(coarse_step_size_mwh, 0.1)  # Ensure a minimum step size
+        coarse_step_size_mwh = max(max_battery_capacity_mwh / 10, 0.1)  # Ensure a minimum step size
 
         # Generate arrays for coarse search
         panel_sizes_mwp_coarse = np.arange(0.0, max_solar_capacity_mwp + coarse_step_size_mwp, coarse_step_size_mwp)
@@ -213,9 +212,6 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                     total_consumption = sum(load_curve)
                     portion_covered = ((covered_by_panels + covered_by_batteries) / total_consumption) * 100
 
-                    # Since we're removing target coverage, we don't skip based on coverage
-                    # Instead, collect all configurations
-
                     # Calculate the total energy used per year
                     total_used_energy_per_year = (covered_by_panels + covered_by_batteries) / total_years
 
@@ -282,6 +278,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                         'net_savings': net_savings,
                         'revenue_from_sales': revenue_from_sales,
                         'saves_money': saves_money,
+                        'lifetime_used_energy_kwh': lifetime_used_energy_kwh,
                         'cost_breakdown': {
                             'Panel Cost': panel_cost,
                             'Battery Cost': battery_cost,
@@ -293,6 +290,41 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                             'Revenue from Energy Sales': revenue_from_sales,
                         }
                     }
+
+                    # Calculate IRR considering inflation
+                    cash_flows = [-initial_capex]
+                    annual_revenue = (revenue_from_sales / project_lifetime) + ((grid_cost_without_solar - grid_cost_with_solar) / project_lifetime)
+                    annual_opex = opex / project_lifetime
+                    replacement_cost_per_replacement = batteries_mwh * battery_cost_per_mwh
+
+                    # Define replacement years
+                    if batteries_mwh > 0 and battery_lifespan > 0:
+                        replacement_years = list(range(battery_lifespan, project_lifetime + 1, battery_lifespan))
+                    else:
+                        replacement_years = []
+
+                    for year in range(1, project_lifetime + 1):
+                        # Adjust revenue and opex for inflation
+                        revenue = annual_revenue / ((1 + inflation_rate) ** year)
+                        opex_year = annual_opex / ((1 + inflation_rate) ** year)
+
+                        # Add replacement cost if applicable
+                        if year in replacement_years:
+                            replacement_cost = replacement_cost_per_replacement / ((1 + inflation_rate) ** year)
+                        else:
+                            replacement_cost = 0.0
+
+                        net_cash_flow = revenue - opex_year - replacement_cost
+                        cash_flows.append(net_cash_flow)
+
+                    try:
+                        irr = npf.irr(cash_flows)
+                        irr_percentage = irr * 100 if not np.isnan(irr) else None
+                    except:
+                        irr_percentage = None
+
+                    config['irr'] = irr_percentage
+
                     configurations.append(config)
 
                 # Update progress bar in every iteration
@@ -300,7 +332,6 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                 progress_bar.progress(min(current_iteration / total_iterations, 1.0))
         else:
             # When not using batteries, set batteries_mwh to 0
-            panels_mwp_fixed = panels_mwp
             batteries_mwh = 0.0
             covered_by_panels = 0
             not_covered = 0
@@ -389,6 +420,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                 'net_savings': net_savings,
                 'revenue_from_sales': revenue_from_sales,
                 'saves_money': saves_money,
+                'lifetime_used_energy_kwh': lifetime_used_energy_kwh,
                 'cost_breakdown': {
                     'Panel Cost': panel_cost,
                     'Battery Cost': battery_cost,
@@ -400,6 +432,28 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                     'Revenue from Energy Sales': revenue_from_sales,
                 }
             }
+
+            # Calculate IRR considering inflation
+            cash_flows = [-initial_capex]
+            annual_revenue = (revenue_from_sales / project_lifetime) + ((grid_cost_without_solar - grid_cost_with_solar) / project_lifetime)
+            annual_opex = opex / project_lifetime
+
+            for year in range(1, project_lifetime + 1):
+                # Adjust revenue and opex for inflation
+                revenue = annual_revenue / ((1 + inflation_rate) ** year)
+                opex_year = annual_opex / ((1 + inflation_rate) ** year)
+
+                net_cash_flow = revenue - opex_year
+                cash_flows.append(net_cash_flow)
+
+            try:
+                irr = npf.irr(cash_flows)
+                irr_percentage = irr * 100 if not np.isnan(irr) else None
+            except:
+                irr_percentage = None
+
+            config['irr'] = irr_percentage
+
             configurations.append(config)
 
             # Update progress bar in every iteration
@@ -410,8 +464,15 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
     # Phase 2: Fine Search
     if configurations:
+        # **Filter configurations based on target IRR**
+        valid_configurations = [config for config in configurations if config['irr'] is not None and not np.isnan(config['irr']) and config['irr'] >= target_irr]
+
+        if not valid_configurations:
+            st.warning("No configurations meet the target IRR in coarse search.")
+            return None
+
         # Sort configurations by net_savings in descending order
-        sorted_configurations = sorted(configurations, key=lambda x: x['net_savings'], reverse=True)
+        sorted_configurations = sorted(valid_configurations, key=lambda x: x['net_savings'], reverse=True)
 
         # Select the top configuration with maximum net savings
         top_configuration = sorted_configurations[0]
@@ -469,6 +530,8 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
             if use_batteries:
                 for batteries_mwh in battery_sizes_mwh_fine:
+                    # **Fine Search Inner Loop with Batteries**
+
                     # Define min and max battery states
                     min_battery_state = batteries_mwh * 1000 * min_state_of_charge  # kWh
                     max_battery_state = batteries_mwh * 1000  # kWh
@@ -522,9 +585,6 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                         # Completed all hours without invalid battery state
                         total_consumption = sum(load_curve)
                         portion_covered = ((covered_by_panels + covered_by_batteries) / total_consumption) * 100
-
-                        # Since we're removing target coverage, we don't skip based on coverage
-                        # Instead, collect all configurations
 
                         # Calculate the total energy used per year
                         total_used_energy_per_year = (covered_by_panels + covered_by_batteries) / total_years
@@ -592,6 +652,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                             'net_savings': net_savings,
                             'revenue_from_sales': revenue_from_sales,
                             'saves_money': saves_money,
+                            'lifetime_used_energy_kwh': lifetime_used_energy_kwh,
                             'cost_breakdown': {
                                 'Panel Cost': panel_cost,
                                 'Battery Cost': battery_cost,
@@ -603,19 +664,57 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                                 'Revenue from Energy Sales': revenue_from_sales,
                             }
                         }
+
+                        # Calculate IRR considering inflation
+                        cash_flows = [-initial_capex]
+                        annual_revenue = (revenue_from_sales / project_lifetime) + ((grid_cost_without_solar - grid_cost_with_solar) / project_lifetime)
+                        annual_opex = opex / project_lifetime
+                        replacement_cost_per_replacement = batteries_mwh * battery_cost_per_mwh
+
+                        # Define replacement years
+                        if batteries_mwh > 0 and battery_lifespan > 0:
+                            replacement_years = list(range(battery_lifespan, project_lifetime + 1, battery_lifespan))
+                        else:
+                            replacement_years = []
+
+                        for year in range(1, project_lifetime + 1):
+                            # Adjust revenue and opex for inflation
+                            revenue = annual_revenue / ((1 + inflation_rate) ** year)
+                            opex_year = annual_opex / ((1 + inflation_rate) ** year)
+
+                            # Add replacement cost if applicable
+                            if year in replacement_years:
+                                replacement_cost = replacement_cost_per_replacement / ((1 + inflation_rate) ** year)
+                            else:
+                                replacement_cost = 0.0
+
+                            net_cash_flow = revenue - opex_year - replacement_cost
+                            cash_flows.append(net_cash_flow)
+
+                        try:
+                            irr = npf.irr(cash_flows)
+                            irr_percentage = irr * 100 if not np.isnan(irr) else None
+                        except:
+                            irr_percentage = None
+
+                        config['irr'] = irr_percentage
+
+                    if config['irr'] is not None and not np.isnan(config['irr']) and config['irr'] >= target_irr:
                         fine_configurations.append(config)
 
                     # Update progress bar in every iteration
                     current_iteration_fine += 1
                     progress_bar_fine.progress(min(current_iteration_fine / total_iterations_fine, 1.0))
             else:
+                # **Fine Search Inner Loop without Batteries**
+
                 # When not using batteries, set batteries_mwh to 0
                 batteries_mwh = 0.0
                 covered_by_panels = 0
                 not_covered = 0
 
                 # Initialize total excess energy for this configuration
-                total_excess_energy_kwh = 0.0  # Initialize here to prevent NameError
+                total_excess_energy_kwh = 0.0  # Define it here to prevent NameError
 
                 for hour in range(len(load_curve)):
                     production = solar_production[hour]
@@ -698,6 +797,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                     'net_savings': net_savings,
                     'revenue_from_sales': revenue_from_sales,
                     'saves_money': saves_money,
+                    'lifetime_used_energy_kwh': lifetime_used_energy_kwh,
                     'cost_breakdown': {
                         'Panel Cost': panel_cost,
                         'Battery Cost': battery_cost,
@@ -709,25 +809,52 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                         'Revenue from Energy Sales': revenue_from_sales,
                     }
                 }
-                fine_configurations.append(config)
+
+                # Calculate IRR considering inflation
+                cash_flows = [-initial_capex]
+                annual_revenue = (revenue_from_sales / project_lifetime) + ((grid_cost_without_solar - grid_cost_with_solar) / project_lifetime)
+                annual_opex = opex / project_lifetime
+
+                for year in range(1, project_lifetime + 1):
+                    # Adjust revenue and opex for inflation
+                    revenue = annual_revenue / ((1 + inflation_rate) ** year)
+                    opex_year = annual_opex / ((1 + inflation_rate) ** year)
+
+                    net_cash_flow = revenue - opex_year
+                    cash_flows.append(net_cash_flow)
+
+                try:
+                    irr = npf.irr(cash_flows)
+                    irr_percentage = irr * 100 if not np.isnan(irr) else None
+                except:
+                    irr_percentage = None
+
+                config['irr'] = irr_percentage
+
+                if config['irr'] is not None and not np.isnan(config['irr']) and config['irr'] >= target_irr:
+                    fine_configurations.append(config)
 
                 # Update progress bar in every iteration
-                current_iteration += 1
-                progress_bar.progress(min(current_iteration / total_iterations, 1.0))
+                current_iteration_fine += 1
+                progress_bar_fine.progress(min(current_iteration_fine / total_iterations_fine, 1.0))
 
         # Ensure the progress bar reaches 100% at the end of fine search
         progress_bar_fine.progress(1.0)
 
-        if not fine_configurations:
-            # If no configurations found in fine search, return the top configuration from coarse search
+        if fine_configurations:
+            # Sort fine configurations by net_savings in descending order
+            sorted_fine_configurations = sorted(fine_configurations, key=lambda x: x['net_savings'], reverse=True)
+            # Return the best configuration
+            return [sorted_fine_configurations[0]]
+        else:
+            st.warning("No configurations meet the target IRR in fine search.")
+            # Return the top configuration from coarse search
             return [top_configuration]
+    else:
+        st.error("No configurations found in coarse search.")
+        return None
 
-        # Sort fine configurations by net_savings in descending order
-        sorted_fine_configurations = sorted(fine_configurations, key=lambda x: x['net_savings'], reverse=True)
-
-        # Return the best configuration
-        return [sorted_fine_configurations[0]]
-
+# Streamlit UI
 # Streamlit UI
 st.set_page_config(page_title="Solar Plant Projection Tool", layout="wide")
 st.title("🌞 Solar Plant Projection Tool")
@@ -763,7 +890,7 @@ wp_per_m2 = st.sidebar.number_input("🔋 Panel Efficiency (Wp/m²)", value=200,
 # Energy Consumption Input
 st.sidebar.header("🔌 Energy Consumption")
 
-# **New Addition: Load Curve Upload**
+# **Load Curve Upload**
 st.sidebar.subheader("📂 Upload Load Curve Excel File (Optional)")
 uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx"])
 
@@ -849,12 +976,16 @@ electricity_price = st.sidebar.number_input("💶 Electricity Price (€/kWh)", 
 st.sidebar.header("💸 Energy Sales")
 sell_price = st.sidebar.number_input("💶 Sell Price (€/kWh)", value=0.05, min_value=0.0, step=0.01)
 
+# Inflation Rate Input
+st.sidebar.header("📈 Economic Parameters")
+inflation_rate = st.sidebar.number_input("💹 Inflation Rate (% per year)", value=2.0, min_value=0.0, max_value=100.0, step=0.1) / 100
+
+# **Target IRR Input**
+target_irr = st.sidebar.number_input("🎯 Target Internal Rate of Return (% per year)", value=5.0, min_value=0.0, max_value=100.0, step=0.1)
+
 # Day Start for Plotting
 day_start = st.sidebar.number_input("📅 Select start day for plot (1-365)", min_value=1, max_value=365, value=1,
                                     key='day_start_selection')
-
-# Remove Target Coverage Slider
-# st.sidebar.slider("🎯 Target Coverage (%)", min_value=0, max_value=100, value=80, step=1)
 
 # Calculate Button
 if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is not None:
@@ -866,7 +997,8 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
         else:
             # Generate a fictional load curve based on user input
             st.write("📈 **Generating Fictional Load Curve**")
-            load_curve = generate_fictional_load_curve(len(hourly_data) if 'hourly_data' in locals() and hourly_data else 8760, total_yearly_consumption)
+            # Assuming hourly_data will be fetched after this, temporarily set hours to 8760
+            load_curve = generate_fictional_load_curve(8760, total_yearly_consumption)
 
         # Fetch equivalent production hours
         # Note: The installed_capacity_kw parameter is not used in the current function
@@ -907,12 +1039,22 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                 electricity_price,
                 sell_price,
                 progress_bar,
+                inflation_rate,
+                target_irr,  # Pass the target IRR
                 use_batteries=include_batteries  # Pass the checkbox state
             )
+            # Calculate total years based on start and end year
+            total_years = end_year - start_year + 1
+
+            # Total energy consumption per year (kWh)
+            total_consumption_per_year = sum(load_curve) / total_years
+
+            # Total energy consumption over the project lifetime
+            total_consumption_lifetime = total_consumption_per_year * project_lifetime
 
             if optimal_configurations:
                 st.success(
-                    f"✅ **Optimization Complete!** Found {len(optimal_configurations)} optimal configuration(s).")
+                    f"✅ **Optimization Complete!** Found {len(optimal_configurations)} optimal configuration(s) that meet the target IRR.")
                 st.write(
                     f"### 🏆 Optimal Configuration for Location ({latitude}, {longitude})")
 
@@ -926,6 +1068,10 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                     st.markdown(f"- **Portion of Consumption Covered**: {config['portion_covered']:.2f}%")
                     st.markdown(f"- **Total CAPEX**: €{config['total_capex']:,.2f}")
                     st.markdown(f"- **Total Cost of Energy (TCOE)**: €{config['tcoe']:.4f}/kWh")
+                    if config['irr'] is not None:
+                        st.markdown(f"- **Internal Rate of Return (IRR)**: {config['irr']:.2f}%")
+                    else:
+                        st.markdown(f"- **Internal Rate of Return (IRR)**: N/A")
 
                     # Display net savings or loss with revenue
                     net_savings = config['net_savings']
@@ -953,6 +1099,103 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
 
                 # Proceed with plotting for the best configuration
                 best_config = optimal_configurations[0]
+
+                # Calculate total_consumption_lifetime in the main scope if not already calculated
+                total_years = end_year - start_year + 1
+                total_consumption_per_year = sum(load_curve) / total_years
+                total_consumption_lifetime = total_consumption_per_year * project_lifetime
+
+                # Now that best_config contains 'lifetime_used_energy_kwh', we can calculate:
+                grid_cost_without_solar = total_consumption_lifetime * electricity_price
+                grid_cost_with_solar = (total_consumption_lifetime - best_config['lifetime_used_energy_kwh']) * electricity_price
+
+                # Generate annual cash flows for the best configuration
+                initial_capex = best_config['total_capex'] - best_config['cost_breakdown'].get('Battery Replacement Cost', 0)
+                annual_revenue = (best_config['revenue_from_sales'] / project_lifetime) + ((grid_cost_without_solar - grid_cost_with_solar) / project_lifetime)
+                annual_opex = best_config['opex'] / project_lifetime
+                replacement_cost_per_replacement = best_config['batteries_mwh'] * battery_cost_per_mwh
+
+                # Define replacement years
+                if best_config['batteries_mwh'] > 0 and battery_lifespan > 0:
+                    replacement_years = list(range(battery_lifespan, project_lifetime, battery_lifespan))
+                else:
+                    replacement_years = []
+
+                # Adjust years to go from 0 to project_lifetime - 1
+                years = list(range(0, project_lifetime))
+
+                # Prepare lists to store annual values
+                revenues = []
+                opex_list = []
+                replacement_costs = []
+                net_cash_flows = []
+
+                for year in range(1, project_lifetime):
+                    # Adjust revenue and opex for inflation
+                    revenue = annual_revenue / ((1 + inflation_rate) ** year)
+                    opex_year = annual_opex / ((1 + inflation_rate) ** year)
+
+                    # Add replacement cost if applicable
+                    if year in replacement_years:
+                        replacement_cost = replacement_cost_per_replacement / ((1 + inflation_rate) ** year)
+                    else:
+                        replacement_cost = 0.0
+
+                    net_cash_flow = revenue - opex_year - replacement_cost
+
+                    # Append values to lists
+                    revenues.append(revenue)
+                    opex_list.append(-opex_year)  # Costs are negative
+                    replacement_costs.append(-replacement_cost)  # Costs are negative
+                    net_cash_flows.append(net_cash_flow)
+
+                # Prepare DataFrame for plotting
+                df_cash_flow = pd.DataFrame({
+                    'CAPEX': [0] * len(years),
+                    'Revenue': [0] * len(years),
+                    'OPEX': [0] * len(years),
+                    'Replacement Cost': [0] * len(years),
+                    'Net Cash Flow': [0] * len(years)
+                }, index=years)
+
+                # Set values for each year using .loc
+                df_cash_flow.loc[0, 'CAPEX'] = -initial_capex  # CAPEX in year 0
+                df_cash_flow.loc[1:, 'Revenue'] = revenues
+                df_cash_flow.loc[1:, 'OPEX'] = opex_list
+                df_cash_flow.loc[1:, 'Replacement Cost'] = replacement_costs
+                df_cash_flow['Net Cash Flow'] = df_cash_flow[['CAPEX', 'Revenue', 'OPEX', 'Replacement Cost']].sum(axis=1)
+
+                # **Calculate cumulative cash flow**
+                df_cash_flow['Cumulative Cash Flow'] = df_cash_flow['Net Cash Flow'].cumsum()
+
+                # Plot the bar chart with cumulative cash flow
+                fig, ax1 = plt.subplots(figsize=(12, 6))
+
+                # Plot stacked bar chart
+                df_cash_flow[['CAPEX', 'Revenue', 'OPEX', 'Replacement Cost']].plot(kind='bar', stacked=True, ax=ax1)
+
+                # Plot net cash flow
+                ax1.plot(df_cash_flow.index, df_cash_flow['Net Cash Flow'].values, color='black', marker='o', label='Net Cash Flow')
+
+                # Create a secondary y-axis for cumulative cash flow
+                ax2 = ax1.twinx()
+
+                # Plot cumulative cash flow on the secondary y-axis
+                ax2.plot(df_cash_flow.index, df_cash_flow['Cumulative Cash Flow'].values, color='green', marker='D', linestyle='--', label='Cumulative Cash Flow')
+
+                # Set labels and titles
+                ax1.set_xlabel('Year')
+                ax1.set_ylabel('Cash Flow (M€)')
+                ax2.set_ylabel('Cumulative Cash Flow (M€)')
+                ax1.set_title('Annual Cash Flows with IRR: {:.2f}%'.format(best_config['irr']))
+
+                # Combine legends from both axes
+                lines1, labels1 = ax1.get_legend_handles_labels()
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax1.legend(lines1 + lines2, labels1 + labels2, loc='best')
+
+                st.pyplot(fig)
+
 
                 # Calculate panel area in m² using the best configuration
                 panels_mwp = best_config['panels_mwp']
@@ -1065,6 +1308,6 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                     st.warning("⚠️ Selected period for plotting has no data.")
 
             else:
-                st.error("❌ No optimal configuration found that meets the target coverage.")
+                st.error("❌ No optimal configuration found based on IRR.")
         else:
             st.error("❌ Failed to retrieve data from PVGIS API.")

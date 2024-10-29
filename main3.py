@@ -4,7 +4,8 @@ import numpy as np
 import numpy_financial as npf  # Import numpy_financial
 import pandas as pd
 import matplotlib.pyplot as plt
-from io import BytesIO
+import io
+from xlsxwriter import Workbook
 
 # Function to fetch equivalent production hours from PVGIS API
 def get_equivalent_production_hours(lat, lon, installed_capacity_kw, system_loss, startyear=2018, endyear=2020):
@@ -305,12 +306,12 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
                     for year in range(1, project_lifetime + 1):
                         # Adjust revenue and opex for inflation
-                        revenue = annual_revenue / ((1 + inflation_rate) ** year)
-                        opex_year = annual_opex / ((1 + inflation_rate) ** year)
+                        revenue = annual_revenue / ((1 + inflation_rate) ** (year-1))
+                        opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
 
                         # Add replacement cost if applicable
                         if year in replacement_years:
-                            replacement_cost = replacement_cost_per_replacement / ((1 + inflation_rate) ** year)
+                            replacement_cost = replacement_cost_per_replacement * ((1 + inflation_rate) ** (year-1))
                         else:
                             replacement_cost = 0.0
 
@@ -440,8 +441,8 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
             for year in range(1, project_lifetime + 1):
                 # Adjust revenue and opex for inflation
-                revenue = annual_revenue / ((1 + inflation_rate) ** year)
-                opex_year = annual_opex / ((1 + inflation_rate) ** year)
+                revenue = annual_revenue / ((1 + inflation_rate) ** (year-1))
+                opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
 
                 net_cash_flow = revenue - opex_year
                 cash_flows.append(net_cash_flow)
@@ -679,12 +680,12 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
                         for year in range(1, project_lifetime + 1):
                             # Adjust revenue and opex for inflation
-                            revenue = annual_revenue / ((1 + inflation_rate) ** year)
-                            opex_year = annual_opex / ((1 + inflation_rate) ** year)
+                            revenue = annual_revenue / ((1 + inflation_rate) ** (year-1))
+                            opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
 
                             # Add replacement cost if applicable
                             if year in replacement_years:
-                                replacement_cost = replacement_cost_per_replacement / ((1 + inflation_rate) ** year)
+                                replacement_cost = replacement_cost_per_replacement * ((1 + inflation_rate) ** (year-1))
                             else:
                                 replacement_cost = 0.0
 
@@ -817,8 +818,8 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
                 for year in range(1, project_lifetime + 1):
                     # Adjust revenue and opex for inflation
-                    revenue = annual_revenue / ((1 + inflation_rate) ** year)
-                    opex_year = annual_opex / ((1 + inflation_rate) ** year)
+                    revenue = annual_revenue / ((1 + inflation_rate) ** (year-1))
+                    opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
 
                     net_cash_flow = revenue - opex_year
                     cash_flows.append(net_cash_flow)
@@ -1122,7 +1123,7 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                     replacement_years = []
 
                 # Adjust years to go from 0 to project_lifetime - 1
-                years = list(range(0, project_lifetime))
+                years = list(range(0, project_lifetime+1))
 
                 # Prepare lists to store annual values
                 revenues = []
@@ -1130,14 +1131,14 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                 replacement_costs = []
                 net_cash_flows = []
 
-                for year in range(1, project_lifetime):
+                for year in range(1, project_lifetime+1):
                     # Adjust revenue and opex for inflation
-                    revenue = annual_revenue / ((1 + inflation_rate) ** year)
-                    opex_year = annual_opex / ((1 + inflation_rate) ** year)
+                    revenue = annual_revenue / ((1 + inflation_rate) ** (year-1))
+                    opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
 
                     # Add replacement cost if applicable
                     if year in replacement_years:
-                        replacement_cost = replacement_cost_per_replacement / ((1 + inflation_rate) ** year)
+                        replacement_cost = replacement_cost_per_replacement * ((1 + inflation_rate) ** (year-1))
                     else:
                         replacement_cost = 0.0
 
@@ -1183,6 +1184,21 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                 # Plot cumulative cash flow on the secondary y-axis
                 ax2.plot(df_cash_flow.index, df_cash_flow['Cumulative Cash Flow'].values, color='green', marker='D', linestyle='--', label='Cumulative Cash Flow')
 
+                min_value = min(
+                    df_cash_flow[['CAPEX', 'Revenue', 'OPEX', 'Replacement Cost']].sum(axis=1).min(),
+                    df_cash_flow['Net Cash Flow'].min(),
+                )
+
+                max_value = max(
+                    df_cash_flow[['CAPEX', 'Revenue', 'OPEX', 'Replacement Cost']].sum(axis=1).max(),
+                    df_cash_flow['Net Cash Flow'].max(),
+                    df_cash_flow['Cumulative Cash Flow'].max(),
+                )
+
+
+                ax1.set_ylim(bottom=min_value + 0.1*min_value, top=max_value+0.1*max_value)
+                #ax2.set_ylim(bottom=min_value - 0.05*min_value, top=max_value+0.05*max_value)
+
                 # Set labels and titles
                 ax1.set_xlabel('Year')
                 ax1.set_ylabel('Cash Flow (M€)')
@@ -1192,10 +1208,66 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                 # Combine legends from both axes
                 lines1, labels1 = ax1.get_legend_handles_labels()
                 lines2, labels2 = ax2.get_legend_handles_labels()
-                ax1.legend(lines1 + lines2, labels1 + labels2, loc='best')
+                ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
 
                 st.pyplot(fig)
 
+                hypotheses = {
+                    'Coordinates (Latitude)': latitude,
+                    'Coordinates (Longitude)': longitude,
+                    'System Loss (%)': system_loss,
+                    'Start Year': start_year,
+                    'End Year': end_year,
+                    'Project Lifetime (years)': project_lifetime,
+                    'Panel Efficiency (Wp/m²)': wp_per_m2,
+                    'Total Yearly Consumption (kWh/year)': total_yearly_consumption,
+                    'Include Batteries': include_batteries,
+                    'Battery Cost (€/MWh)': battery_cost_per_mwh,
+                    'Battery Maintenance Cost (€/MWh/year)': maintenance_cost_per_mwh_battery,
+                    'Battery Lifespan (years)': battery_lifespan,
+                    'Minimum State of Charge (%)': min_state_of_charge * 100,
+                    'Panel Cost (€/MWp)': panel_cost_per_mwp,
+                    'Installation Cost (€/MWp)': installation_cost_per_mwp,
+                    'Panel Maintenance Cost (€/MWp/year)': maintenance_cost_per_mwp,
+                    'Panel Degradation Rate (% per year)': panel_degradation_rate * 100,
+                    'Electricity Price (€/kWh)': electricity_price,
+                    'Sell Price (€/kWh)': sell_price,
+                    'Inflation Rate (% per year)': inflation_rate * 100,
+                    'Target Internal Rate of Return (% per year)': target_irr,
+                }
+
+                # Reset index and rename it to 'Year' for clarity
+                df_cash_flow = df_cash_flow.reset_index().rename(columns={'index': 'Year'})
+
+                # Create a BytesIO buffer to hold the Excel file in memory
+                output = io.BytesIO()
+
+                # Write the hypotheses and cash flow to separate sheets in the Excel file
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    # Convert hypotheses dictionary to DataFrame
+                    df_hypotheses = pd.DataFrame(list(hypotheses.items()), columns=['Parameter', 'Value'])
+
+                    # Write hypotheses to the first sheet
+                    df_hypotheses.to_excel(writer, sheet_name='Hypotheses', index=False)
+
+                    # Write cash flow to the second sheet
+                    df_cash_flow.to_excel(writer, sheet_name='Cash Flow Statement', index=False)
+
+                    # Save the writer
+                    writer.close()
+
+                # Set the buffer position to the beginning
+                output.seek(0)
+
+                st.markdown("### 📁 Download Financial Cash Flow Statement")
+
+                # Provide the download button
+                st.download_button(
+                    label="💾 Download Excel File",
+                    data=output,
+                    file_name='Financial_Cash_Flow_Statement.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
 
                 # Calculate panel area in m² using the best configuration
                 panels_mwp = best_config['panels_mwp']

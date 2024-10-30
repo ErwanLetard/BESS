@@ -216,8 +216,10 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                     total_consumption = sum(load_curve)
                     portion_covered = ((covered_by_panels + covered_by_batteries) / total_consumption) * 100
 
-                    # Calculate the total energy used per year
+                    # Calculate per-year values
                     total_used_energy_per_year = (covered_by_panels + covered_by_batteries) / total_years
+                    total_excess_energy_per_year = total_excess_energy_kwh / total_years
+                    total_consumption_per_year = total_consumption / total_years
 
                     # Adjust total used energy for the project lifetime and degradation
                     degradation_factors = [(1 - panel_degradation_rate) ** year for year in range(project_lifetime)]
@@ -250,11 +252,14 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
                     total_cost = total_capex + opex
 
-                    # Calculate revenue from energy sales
-                    revenue_from_sales = total_excess_energy_kwh * sell_price
-
                     # Calculate grid energy costs without solar installation
                     grid_cost_without_solar = total_consumption_lifetime * electricity_price
+
+                    # Calculate revenue from energy sales over project lifetime
+                    total_revenue_from_sales = sum(
+                        total_excess_energy_per_year * ((1 - panel_degradation_rate) ** year) * sell_price
+                        for year in range(project_lifetime)
+                    )
 
                     # Calculate remaining grid energy costs with solar installation
                     grid_cost_with_solar = lifetime_uncovered_energy_kwh * electricity_price
@@ -263,7 +268,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                     total_cost_with_solar = total_cost + grid_cost_with_solar
 
                     # Calculate net savings by considering revenue from sales
-                    net_savings = grid_cost_without_solar - (total_cost_with_solar - revenue_from_sales)
+                    net_savings = grid_cost_without_solar - (total_cost_with_solar - total_revenue_from_sales)
 
                     # Determine if the installation saves money
                     saves_money = net_savings > 0
@@ -278,11 +283,14 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                         'total_capex': total_capex,
                         'opex': opex,
                         'project_lifetime': project_lifetime,
-                        'tcoe': (total_cost - revenue_from_sales) / lifetime_used_energy_kwh if lifetime_used_energy_kwh > 0 else float('inf'),
+                        'tcoe': (total_cost - total_revenue_from_sales) / lifetime_used_energy_kwh if lifetime_used_energy_kwh > 0 else float('inf'),
                         'net_savings': net_savings,
-                        'revenue_from_sales': revenue_from_sales,
+                        'revenue_from_sales': total_revenue_from_sales,
                         'saves_money': saves_money,
                         'lifetime_used_energy_kwh': lifetime_used_energy_kwh,
+                        'total_used_energy_per_year': total_used_energy_per_year,
+                        'total_excess_energy_per_year': total_excess_energy_per_year,
+                        'total_consumption_per_year': total_consumption_per_year,
                         'cost_breakdown': {
                             'Panel Cost': panel_cost,
                             'Battery Cost': battery_cost,
@@ -291,13 +299,12 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                             'Panel Maintenance Cost': panel_maintenance_cost,
                             'Battery Maintenance Cost': battery_maintenance_cost,
                             'Remaining Grid Energy Cost': grid_cost_with_solar,
-                            'Revenue from Energy Sales': revenue_from_sales,
+                            'Revenue from Energy Sales': total_revenue_from_sales,
                         }
                     }
 
-                    # Calculate IRR considering inflation
+                    # Calculate IRR considering inflation and degradation
                     cash_flows = [-initial_capex]
-                    annual_revenue = (revenue_from_sales / project_lifetime) + ((grid_cost_without_solar - grid_cost_with_solar) / project_lifetime)
                     annual_opex = opex / project_lifetime
                     replacement_cost_per_replacement = batteries_mwh * battery_cost_per_mwh
 
@@ -307,14 +314,24 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                     else:
                         replacement_years = []
 
+                    grid_cost_without_solar_per_year = total_consumption_per_year * electricity_price
+
                     for year in range(1, project_lifetime + 1):
-                        # Adjust revenue and opex for inflation
-                        revenue = annual_revenue #pas d'inflation sur les revenus car pas de vente
-                        opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
+                        degradation_factor = (1 - panel_degradation_rate) ** (year - 1)
+                        annual_used_energy = total_used_energy_per_year * degradation_factor
+                        annual_excess_energy = total_excess_energy_per_year * degradation_factor
+
+                        revenue_from_sales_year = annual_excess_energy * sell_price
+                        grid_cost_with_solar_year = (total_consumption_per_year - annual_used_energy) * electricity_price
+                        grid_cost_saving_year = grid_cost_without_solar_per_year - grid_cost_with_solar_year
+
+                        # Total revenue for the year
+                        revenue = revenue_from_sales_year + grid_cost_saving_year
+                        opex_year = annual_opex * ((1 + inflation_rate) ** (year - 1))
 
                         # Add replacement cost if applicable
                         if year in replacement_years:
-                            replacement_cost = replacement_cost_per_replacement * ((1 + inflation_rate) ** (year-1))
+                            replacement_cost = replacement_cost_per_replacement * ((1 + inflation_rate) ** (year - 1))
                         else:
                             replacement_cost = 0.0
 
@@ -364,8 +381,10 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
             total_consumption = sum(load_curve)
             portion_covered = (covered_by_panels / total_consumption) * 100
 
-            # Calculate the total energy used per year
+            # Calculate per-year values
             total_used_energy_per_year = covered_by_panels / total_years
+            total_excess_energy_per_year = total_excess_energy_kwh / total_years
+            total_consumption_per_year = total_consumption / total_years
 
             # Adjust total used energy for the project lifetime and degradation
             degradation_factors = [(1 - panel_degradation_rate) ** year for year in range(project_lifetime)]
@@ -392,11 +411,14 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
             total_cost = total_capex + opex
 
-            # Calculate revenue from energy sales
-            revenue_from_sales = total_excess_energy_kwh * sell_price
-
             # Calculate grid energy costs without solar installation
             grid_cost_without_solar = total_consumption_lifetime * electricity_price
+
+            # Calculate revenue from energy sales over project lifetime
+            total_revenue_from_sales = sum(
+                total_excess_energy_per_year * ((1 - panel_degradation_rate) ** year) * sell_price
+                for year in range(project_lifetime)
+            )
 
             # Calculate remaining grid energy costs with solar installation
             grid_cost_with_solar = lifetime_uncovered_energy_kwh * electricity_price
@@ -405,7 +427,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
             total_cost_with_solar = total_cost + grid_cost_with_solar
 
             # Calculate net savings by considering revenue from sales
-            net_savings = grid_cost_without_solar - (total_cost_with_solar - revenue_from_sales)
+            net_savings = grid_cost_without_solar - (total_cost_with_solar - total_revenue_from_sales)
 
             # Determine if the installation saves money
             saves_money = net_savings > 0
@@ -420,11 +442,14 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                 'total_capex': total_capex,
                 'opex': opex,
                 'project_lifetime': project_lifetime,
-                'tcoe': (total_cost - revenue_from_sales) / lifetime_used_energy_kwh if lifetime_used_energy_kwh > 0 else float('inf'),
+                'tcoe': (total_cost - total_revenue_from_sales) / lifetime_used_energy_kwh if lifetime_used_energy_kwh > 0 else float('inf'),
                 'net_savings': net_savings,
-                'revenue_from_sales': revenue_from_sales,
+                'revenue_from_sales': total_revenue_from_sales,
                 'saves_money': saves_money,
                 'lifetime_used_energy_kwh': lifetime_used_energy_kwh,
+                'total_used_energy_per_year': total_used_energy_per_year,
+                'total_excess_energy_per_year': total_excess_energy_per_year,
+                'total_consumption_per_year': total_consumption_per_year,
                 'cost_breakdown': {
                     'Panel Cost': panel_cost,
                     'Battery Cost': battery_cost,
@@ -433,19 +458,28 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                     'Panel Maintenance Cost': panel_maintenance_cost,
                     'Battery Maintenance Cost': battery_maintenance_cost,
                     'Remaining Grid Energy Cost': grid_cost_with_solar,
-                    'Revenue from Energy Sales': revenue_from_sales,
+                    'Revenue from Energy Sales': total_revenue_from_sales,
                 }
             }
 
-            # Calculate IRR considering inflation
+            # Calculate IRR considering inflation and degradation
             cash_flows = [-initial_capex]
-            annual_revenue = (revenue_from_sales / project_lifetime) + ((grid_cost_without_solar - grid_cost_with_solar) / project_lifetime)
             annual_opex = opex / project_lifetime
 
+            grid_cost_without_solar_per_year = total_consumption_per_year * electricity_price
+
             for year in range(1, project_lifetime + 1):
-                # Adjust revenue and opex for inflation
-                revenue = annual_revenue
-                opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
+                degradation_factor = (1 - panel_degradation_rate) ** (year - 1)
+                annual_used_energy = total_used_energy_per_year * degradation_factor
+                annual_excess_energy = total_excess_energy_per_year * degradation_factor
+
+                revenue_from_sales_year = annual_excess_energy * sell_price
+                grid_cost_with_solar_year = (total_consumption_per_year - annual_used_energy) * electricity_price
+                grid_cost_saving_year = grid_cost_without_solar_per_year - grid_cost_with_solar_year
+
+                # Total revenue for the year
+                revenue = revenue_from_sales_year + grid_cost_saving_year
+                opex_year = annual_opex * ((1 + inflation_rate) ** (year - 1))
 
                 net_cash_flow = revenue - opex_year
                 cash_flows.append(net_cash_flow)
@@ -590,8 +624,10 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                         total_consumption = sum(load_curve)
                         portion_covered = ((covered_by_panels + covered_by_batteries) / total_consumption) * 100
 
-                        # Calculate the total energy used per year
+                        # Calculate per-year values
                         total_used_energy_per_year = (covered_by_panels + covered_by_batteries) / total_years
+                        total_excess_energy_per_year = total_excess_energy_kwh / total_years
+                        total_consumption_per_year = total_consumption / total_years
 
                         # Adjust total used energy for the project lifetime and degradation
                         degradation_factors = [(1 - panel_degradation_rate) ** year for year in range(project_lifetime)]
@@ -624,11 +660,14 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
                         total_cost = total_capex + opex
 
-                        # Calculate revenue from energy sales
-                        revenue_from_sales = total_excess_energy_kwh * sell_price
-
                         # Calculate grid energy costs without solar installation
                         grid_cost_without_solar = total_consumption_lifetime * electricity_price
+
+                        # Calculate revenue from energy sales over project lifetime
+                        total_revenue_from_sales = sum(
+                            total_excess_energy_per_year * ((1 - panel_degradation_rate) ** year) * sell_price
+                            for year in range(project_lifetime)
+                        )
 
                         # Calculate remaining grid energy costs with solar installation
                         grid_cost_with_solar = lifetime_uncovered_energy_kwh * electricity_price
@@ -637,7 +676,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                         total_cost_with_solar = total_cost + grid_cost_with_solar
 
                         # Calculate net savings by considering revenue from sales
-                        net_savings = grid_cost_without_solar - (total_cost_with_solar - revenue_from_sales)
+                        net_savings = grid_cost_without_solar - (total_cost_with_solar - total_revenue_from_sales)
 
                         # Determine if the installation saves money
                         saves_money = net_savings > 0
@@ -652,11 +691,14 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                             'total_capex': total_capex,
                             'opex': opex,
                             'project_lifetime': project_lifetime,
-                            'tcoe': (total_cost - revenue_from_sales) / lifetime_used_energy_kwh if lifetime_used_energy_kwh > 0 else float('inf'),
+                            'tcoe': (total_cost - total_revenue_from_sales) / lifetime_used_energy_kwh if lifetime_used_energy_kwh > 0 else float('inf'),
                             'net_savings': net_savings,
-                            'revenue_from_sales': revenue_from_sales,
+                            'revenue_from_sales': total_revenue_from_sales,
                             'saves_money': saves_money,
                             'lifetime_used_energy_kwh': lifetime_used_energy_kwh,
+                            'total_used_energy_per_year': total_used_energy_per_year,
+                            'total_excess_energy_per_year': total_excess_energy_per_year,
+                            'total_consumption_per_year': total_consumption_per_year,
                             'cost_breakdown': {
                                 'Panel Cost': panel_cost,
                                 'Battery Cost': battery_cost,
@@ -665,13 +707,12 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                                 'Panel Maintenance Cost': panel_maintenance_cost,
                                 'Battery Maintenance Cost': battery_maintenance_cost,
                                 'Remaining Grid Energy Cost': grid_cost_with_solar,
-                                'Revenue from Energy Sales': revenue_from_sales,
+                                'Revenue from Energy Sales': total_revenue_from_sales,
                             }
                         }
 
-                        # Calculate IRR considering inflation
+                        # Calculate IRR considering inflation and degradation
                         cash_flows = [-initial_capex]
-                        annual_revenue = (revenue_from_sales / project_lifetime) + ((grid_cost_without_solar - grid_cost_with_solar) / project_lifetime)
                         annual_opex = opex / project_lifetime
                         replacement_cost_per_replacement = batteries_mwh * battery_cost_per_mwh
 
@@ -681,14 +722,24 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                         else:
                             replacement_years = []
 
+                        grid_cost_without_solar_per_year = total_consumption_per_year * electricity_price
+
                         for year in range(1, project_lifetime + 1):
-                            # Adjust revenue and opex for inflation
-                            revenue = annual_revenue
-                            opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
+                            degradation_factor = (1 - panel_degradation_rate) ** (year - 1)
+                            annual_used_energy = total_used_energy_per_year * degradation_factor
+                            annual_excess_energy = total_excess_energy_per_year * degradation_factor
+
+                            revenue_from_sales_year = annual_excess_energy * sell_price
+                            grid_cost_with_solar_year = (total_consumption_per_year - annual_used_energy) * electricity_price
+                            grid_cost_saving_year = grid_cost_without_solar_per_year - grid_cost_with_solar_year
+
+                            # Total revenue for the year
+                            revenue = revenue_from_sales_year + grid_cost_saving_year
+                            opex_year = annual_opex * ((1 + inflation_rate) ** (year - 1))
 
                             # Add replacement cost if applicable
                             if year in replacement_years:
-                                replacement_cost = replacement_cost_per_replacement * ((1 + inflation_rate) ** (year-1))
+                                replacement_cost = replacement_cost_per_replacement * ((1 + inflation_rate) ** (year - 1))
                             else:
                                 replacement_cost = 0.0
 
@@ -741,8 +792,10 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                 total_consumption = sum(load_curve)
                 portion_covered = (covered_by_panels / total_consumption) * 100
 
-                # Calculate the total energy used per year
+                # Calculate per-year values
                 total_used_energy_per_year = covered_by_panels / total_years
+                total_excess_energy_per_year = total_excess_energy_kwh / total_years
+                total_consumption_per_year = total_consumption / total_years
 
                 # Adjust total used energy for the project lifetime and degradation
                 degradation_factors = [(1 - panel_degradation_rate) ** year for year in range(project_lifetime)]
@@ -769,11 +822,14 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
                 total_cost = total_capex + opex
 
-                # Calculate revenue from energy sales
-                revenue_from_sales = total_excess_energy_kwh * sell_price
-
                 # Calculate grid energy costs without solar installation
                 grid_cost_without_solar = total_consumption_lifetime * electricity_price
+
+                # Calculate revenue from energy sales over project lifetime
+                total_revenue_from_sales = sum(
+                    total_excess_energy_per_year * ((1 - panel_degradation_rate) ** year) * sell_price
+                    for year in range(project_lifetime)
+                )
 
                 # Calculate remaining grid energy costs with solar installation
                 grid_cost_with_solar = lifetime_uncovered_energy_kwh * electricity_price
@@ -782,7 +838,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                 total_cost_with_solar = total_cost + grid_cost_with_solar
 
                 # Calculate net savings by considering revenue from sales
-                net_savings = grid_cost_without_solar - (total_cost_with_solar - revenue_from_sales)
+                net_savings = grid_cost_without_solar - (total_cost_with_solar - total_revenue_from_sales)
 
                 # Determine if the installation saves money
                 saves_money = net_savings > 0
@@ -797,11 +853,14 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                     'total_capex': total_capex,
                     'opex': opex,
                     'project_lifetime': project_lifetime,
-                    'tcoe': (total_cost - revenue_from_sales) / lifetime_used_energy_kwh if lifetime_used_energy_kwh > 0 else float('inf'),
+                    'tcoe': (total_cost - total_revenue_from_sales) / lifetime_used_energy_kwh if lifetime_used_energy_kwh > 0 else float('inf'),
                     'net_savings': net_savings,
-                    'revenue_from_sales': revenue_from_sales,
+                    'revenue_from_sales': total_revenue_from_sales,
                     'saves_money': saves_money,
                     'lifetime_used_energy_kwh': lifetime_used_energy_kwh,
+                    'total_used_energy_per_year': total_used_energy_per_year,
+                    'total_excess_energy_per_year': total_excess_energy_per_year,
+                    'total_consumption_per_year': total_consumption_per_year,
                     'cost_breakdown': {
                         'Panel Cost': panel_cost,
                         'Battery Cost': battery_cost,
@@ -810,19 +869,28 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
                         'Panel Maintenance Cost': panel_maintenance_cost,
                         'Battery Maintenance Cost': battery_maintenance_cost,
                         'Remaining Grid Energy Cost': grid_cost_with_solar,
-                        'Revenue from Energy Sales': revenue_from_sales,
+                        'Revenue from Energy Sales': total_revenue_from_sales,
                     }
                 }
 
-                # Calculate IRR considering inflation
+                # Calculate IRR considering inflation and degradation
                 cash_flows = [-initial_capex]
-                annual_revenue = (revenue_from_sales / project_lifetime) + ((grid_cost_without_solar - grid_cost_with_solar) / project_lifetime)
                 annual_opex = opex / project_lifetime
 
+                grid_cost_without_solar_per_year = total_consumption_per_year * electricity_price
+
                 for year in range(1, project_lifetime + 1):
-                    # Adjust revenue and opex for inflation
-                    revenue = annual_revenue
-                    opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
+                    degradation_factor = (1 - panel_degradation_rate) ** (year - 1)
+                    annual_used_energy = total_used_energy_per_year * degradation_factor
+                    annual_excess_energy = total_excess_energy_per_year * degradation_factor
+
+                    revenue_from_sales_year = annual_excess_energy * sell_price
+                    grid_cost_with_solar_year = (total_consumption_per_year - annual_used_energy) * electricity_price
+                    grid_cost_saving_year = grid_cost_without_solar_per_year - grid_cost_with_solar_year
+
+                    # Total revenue for the year
+                    revenue = revenue_from_sales_year + grid_cost_saving_year
+                    opex_year = annual_opex * ((1 + inflation_rate) ** (year - 1))
 
                     net_cash_flow = revenue - opex_year
                     cash_flows.append(net_cash_flow)
@@ -965,7 +1033,7 @@ else:
 # Cost Parameters for Panels and Installation
 st.sidebar.header("💰 Cost Parameters for Panels and Installation")
 panel_cost_per_mwp = st.sidebar.number_input("🔆 Panel Cost (€/MWp)", value=115000.0, min_value=0.0)
-installation_cost_per_mwp = st.sidebar.number_input("⚙️ Installation Cost (€/MWp)", value=800000.0, min_value=0.0)
+installation_cost_per_mwp = st.sidebar.number_input("⚙️ Installation Cost (€/MWp)", value=500000.0, min_value=0.0)
 maintenance_cost_per_mwp = st.sidebar.number_input("🛠️ Panel Maintenance Cost (€/MWp/year)", value=8000.0, min_value=0.0)
 
 # Panel Degradation Rate
@@ -974,18 +1042,18 @@ panel_degradation_rate = st.sidebar.number_input("📉 Panel Degradation Rate (%
 
 # Electricity Price Input
 st.sidebar.header("💡 Electricity Price")
-electricity_price = st.sidebar.number_input("💶 Electricity Price (€/kWh)", value=0.15, min_value=0.0)
+electricity_price = st.sidebar.number_input("💶 Electricity Price (€/kWh)", value=0.12, min_value=0.0)
 
 # Sell Price Input
 st.sidebar.header("💸 Energy Sales")
-sell_price = st.sidebar.number_input("💶 Sell Price (€/kWh)", value=0.05, min_value=0.0, step=0.01)
+sell_price = st.sidebar.number_input("💶 Sell Price (€/kWh)", value=0.0, min_value=0.0, step=0.01)
 
 # Inflation Rate Input
 st.sidebar.header("📈 Economic Parameters")
 inflation_rate = st.sidebar.number_input("💹 Inflation Rate (% per year)", value=2.0, min_value=0.0, max_value=100.0, step=0.1) / 100
 
 # **Target IRR Input**
-target_irr = st.sidebar.number_input("🎯 Target Internal Rate of Return (% per year)", value=5.0, min_value=0.0, max_value=100.0, step=0.1)
+target_irr = st.sidebar.number_input("🎯 Target Internal Rate of Return (% per year)", value=12.0, min_value=0.0, max_value=100.0, step=0.1)
 
 # Day Start for Plotting
 day_start = st.sidebar.number_input("📅 Select start day for plot (1-365)", min_value=1, max_value=365, value=1,
@@ -1147,20 +1215,50 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                 # Adjust years to go from 0 to project_lifetime - 1
                 years = list(range(0, project_lifetime+1))
 
+                total_used_energy_per_year = best_config['total_used_energy_per_year']
+                total_excess_energy_per_year = best_config['total_excess_energy_per_year']
+                total_consumption_per_year = best_config['total_consumption_per_year']
+
+                # Project lifetime
+                project_lifetime = best_config['project_lifetime']
+
+                # Grid cost without solar per year
+                grid_cost_without_solar_per_year = total_consumption_per_year * electricity_price
+
+                # Annual OPEX
+                annual_opex = best_config['opex'] / project_lifetime
+
+                # Replacement cost per replacement
+                replacement_cost_per_replacement = best_config['batteries_mwh'] * battery_cost_per_mwh
+
+                # Define replacement years
+                if best_config['batteries_mwh'] > 0 and battery_lifespan > 0:
+                    replacement_years = list(range(battery_lifespan, project_lifetime + 1, battery_lifespan))
+                else:
+                    replacement_years = []
+
                 # Prepare lists to store annual values
                 revenues = []
                 opex_list = []
                 replacement_costs = []
                 net_cash_flows = []
 
-                for year in range(1, project_lifetime+1):
-                    # Adjust revenue and opex for inflation
-                    revenue = annual_revenue
-                    opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
+                for year in range(1, project_lifetime + 1):
+                    degradation_factor = (1 - panel_degradation_rate) ** (year - 1)
+                    annual_used_energy = total_used_energy_per_year * degradation_factor
+                    annual_excess_energy = total_excess_energy_per_year * degradation_factor
+
+                    revenue_from_sales_year = annual_excess_energy * sell_price
+                    grid_cost_with_solar_year = (total_consumption_per_year - annual_used_energy) * electricity_price
+                    grid_cost_saving_year = grid_cost_without_solar_per_year - grid_cost_with_solar_year
+
+                    # Total revenue for the year
+                    revenue = revenue_from_sales_year + grid_cost_saving_year
+                    opex_year = annual_opex * ((1 + inflation_rate) ** (year - 1))
 
                     # Add replacement cost if applicable
                     if year in replacement_years:
-                        replacement_cost = replacement_cost_per_replacement * ((1 + inflation_rate) ** (year-1))
+                        replacement_cost = replacement_cost_per_replacement * ((1 + inflation_rate) ** (year - 1))
                     else:
                         replacement_cost = 0.0
 
@@ -1174,24 +1272,24 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
 
                 # Prepare DataFrame for plotting
                 df_cash_flow = pd.DataFrame({
-                    'CAPEX': [0] * len(years),
-                    'Revenue': [0] * len(years),
-                    'OPEX': [0] * len(years),
-                    'Replacement Cost': [0] * len(years),
-                    'Net Cash Flow': [0] * len(years)
-                }, index=years)
+                    'Year': list(range(0, project_lifetime)),
+                    'CAPEX': [0] * (project_lifetime),
+                    'Revenue': [0] * (project_lifetime),
+                    'OPEX': [0] * (project_lifetime),
+                    'Replacement Cost': [0] * (project_lifetime),
+                    'Net Cash Flow': [0] * (project_lifetime)
+                })
 
-                # Set values for each year using .loc
+                # Set values for each year
+                initial_capex = best_config['total_capex'] - best_config['cost_breakdown'].get('Battery Replacement Cost', 0)
                 df_cash_flow.loc[0, 'CAPEX'] = -initial_capex  # CAPEX in year 0
-                df_cash_flow.loc[1:, 'Revenue'] = revenues
-                df_cash_flow.loc[1:, 'OPEX'] = opex_list
-                df_cash_flow.loc[1:, 'Replacement Cost'] = replacement_costs
+                df_cash_flow.loc[1:, 'Revenue'] = revenues[:-1]
+                df_cash_flow.loc[1:, 'OPEX'] = opex_list[:-1]
+                df_cash_flow.loc[1:, 'Replacement Cost'] = replacement_costs[:-1]
                 df_cash_flow['Net Cash Flow'] = df_cash_flow[['CAPEX', 'Revenue', 'OPEX', 'Replacement Cost']].sum(axis=1)
 
-                # **Calculate cumulative cash flow**
+                # Calculate cumulative cash flow
                 df_cash_flow['Cumulative Cash Flow'] = df_cash_flow['Net Cash Flow'].cumsum()
-
-                df_cash_flow = df_cash_flow.reset_index().rename(columns={'index': 'Year'})
 
                 # Determine the combined range for both y-axes
                 min_value = min(df_cash_flow['Net Cash Flow'].min(), df_cash_flow['Cumulative Cash Flow'].min())
@@ -1202,6 +1300,7 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                 min_value -= padding
                 max_value += padding
 
+                # Create the plot
                 fig = go.Figure()
 
                 # Add stacked bar traces for CAPEX, Revenue, OPEX, and Replacement Cost
@@ -1307,6 +1406,7 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
 
                 # Display the chart in Streamlit
                 st.plotly_chart(fig)
+
 
                 hypotheses = {
                     'Coordinates (Latitude)': latitude,

@@ -6,9 +6,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import io
 from xlsxwriter import Workbook
+import plotly.graph_objects as go  # Ensure this import is at the top
+import plotly.express as px  # For color palettes
+
 
 # Function to fetch equivalent production hours from PVGIS API
-def get_equivalent_production_hours(lat, lon, installed_capacity_kw, system_loss, startyear=2018, endyear=2020):
+def get_equivalent_production_hours(lat, lon, installed_capacity_kw, system_loss, startyear, endyear):
     # Define the parameters for the API request
     params = {
         'lat': lat,
@@ -306,7 +309,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
                     for year in range(1, project_lifetime + 1):
                         # Adjust revenue and opex for inflation
-                        revenue = annual_revenue / ((1 + inflation_rate) ** (year-1))
+                        revenue = annual_revenue #pas d'inflation sur les revenus car pas de vente
                         opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
 
                         # Add replacement cost if applicable
@@ -441,7 +444,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
             for year in range(1, project_lifetime + 1):
                 # Adjust revenue and opex for inflation
-                revenue = annual_revenue / ((1 + inflation_rate) ** (year-1))
+                revenue = annual_revenue
                 opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
 
                 net_cash_flow = revenue - opex_year
@@ -680,7 +683,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
                         for year in range(1, project_lifetime + 1):
                             # Adjust revenue and opex for inflation
-                            revenue = annual_revenue / ((1 + inflation_rate) ** (year-1))
+                            revenue = annual_revenue
                             opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
 
                             # Add replacement cost if applicable
@@ -818,7 +821,7 @@ def optimize_solar_battery_system(load_curve, hourly_data, project_lifetime, wp_
 
                 for year in range(1, project_lifetime + 1):
                     # Adjust revenue and opex for inflation
-                    revenue = annual_revenue / ((1 + inflation_rate) ** (year-1))
+                    revenue = annual_revenue
                     opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
 
                     net_cash_flow = revenue - opex_year
@@ -1088,15 +1091,34 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
 
                     # Prepare data for pie chart
                     cost_breakdown = config['cost_breakdown']
+                    cost_breakdown.pop('Remaining Grid Energy Cost', None)
+                    cost_breakdown.pop('Revenue from Energy Sales', None)
                     labels = list(cost_breakdown.keys())
                     sizes = list(cost_breakdown.values())
 
                     # Create pie chart
-                    fig, ax = plt.subplots()
-                    ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90)
-                    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
-                    plt.title('Cost Breakdown Over Project Lifetime')
-                    st.pyplot(fig)
+                    fig = go.Figure(data=[go.Pie(
+                    labels=labels,
+                    values=sizes,
+                    hoverinfo='label+percent',
+                    textinfo='label+percent',
+                    textfont_size=14
+                )])
+
+                fig.update_traces(
+                    marker=dict(
+                        colors=px.colors.qualitative.Plotly,  # Use a built-in color palette
+                        line=dict(color='#000000', width=2)   # Add a black border to slices
+                    )
+                )
+
+                fig.update_layout(
+                    title='Cost Breakdown Over Project Lifetime (Excluding Grid Costs)',
+                    template='plotly_white',
+                    height=600
+                )
+
+                st.plotly_chart(fig)
 
                 # Proceed with plotting for the best configuration
                 best_config = optimal_configurations[0]
@@ -1133,7 +1155,7 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
 
                 for year in range(1, project_lifetime+1):
                     # Adjust revenue and opex for inflation
-                    revenue = annual_revenue / ((1 + inflation_rate) ** (year-1))
+                    revenue = annual_revenue
                     opex_year = annual_opex * ((1 + inflation_rate) ** (year-1))
 
                     # Add replacement cost if applicable
@@ -1169,48 +1191,122 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                 # **Calculate cumulative cash flow**
                 df_cash_flow['Cumulative Cash Flow'] = df_cash_flow['Net Cash Flow'].cumsum()
 
-                # Plot the bar chart with cumulative cash flow
-                fig, ax1 = plt.subplots(figsize=(12, 6))
+                df_cash_flow = df_cash_flow.reset_index().rename(columns={'index': 'Year'})
 
-                # Plot stacked bar chart
-                df_cash_flow[['CAPEX', 'Revenue', 'OPEX', 'Replacement Cost']].plot(kind='bar', stacked=True, ax=ax1)
+                # Determine the combined range for both y-axes
+                min_value = min(df_cash_flow['Net Cash Flow'].min(), df_cash_flow['Cumulative Cash Flow'].min())
+                max_value = max(df_cash_flow['Net Cash Flow'].max(), df_cash_flow['Cumulative Cash Flow'].max())
 
-                # Plot net cash flow
-                ax1.plot(df_cash_flow.index, df_cash_flow['Net Cash Flow'].values, color='black', marker='o', label='Net Cash Flow')
+                # Optionally, add padding to the range for better visualization
+                padding = (max_value - min_value) * 0.1  # 10% padding
+                min_value -= padding
+                max_value += padding
 
-                # Create a secondary y-axis for cumulative cash flow
-                ax2 = ax1.twinx()
+                fig = go.Figure()
 
-                # Plot cumulative cash flow on the secondary y-axis
-                ax2.plot(df_cash_flow.index, df_cash_flow['Cumulative Cash Flow'].values, color='green', marker='D', linestyle='--', label='Cumulative Cash Flow')
+                # Add stacked bar traces for CAPEX, Revenue, OPEX, and Replacement Cost
+                fig.add_trace(go.Bar(
+                    x=df_cash_flow['Year'],
+                    y=df_cash_flow['CAPEX'],
+                    name='CAPEX',
+                    marker_color='indianred',
+                    hovertemplate='Year %{x}<br>CAPEX: €%{y:,.2f}<extra></extra>'
+                ))
 
-                min_value = min(
-                    df_cash_flow[['CAPEX', 'Revenue', 'OPEX', 'Replacement Cost']].sum(axis=1).min(),
-                    df_cash_flow['Net Cash Flow'].min(),
+                fig.add_trace(go.Bar(
+                    x=df_cash_flow['Year'],
+                    y=df_cash_flow['Revenue'],
+                    name='Revenue',
+                    marker_color='green',
+                    hovertemplate='Year %{x}<br>Revenue: €%{y:,.2f}<extra></extra>'
+                ))
+
+                fig.add_trace(go.Bar(
+                    x=df_cash_flow['Year'],
+                    y=df_cash_flow['OPEX'],
+                    name='OPEX',
+                    marker_color='blue',
+                    hovertemplate='Year %{x}<br>OPEX: €%{y:,.2f}<extra></extra>'
+                ))
+
+                fig.add_trace(go.Bar(
+                    x=df_cash_flow['Year'],
+                    y=df_cash_flow['Replacement Cost'],
+                    name='Replacement Cost',
+                    marker_color='purple',
+                    hovertemplate='Year %{x}<br>Replacement Cost: €%{y:,.2f}<extra></extra>'
+                ))
+
+                # Update the layout to stack the bars
+                fig.update_layout(barmode='relative')
+
+                # Add a line trace for Net Cash Flow
+                fig.add_trace(go.Scatter(
+                    x=df_cash_flow['Year'],
+                    y=df_cash_flow['Net Cash Flow'],
+                    name='Net Cash Flow',
+                    mode='lines+markers',
+                    line=dict(color='red', width=2),
+                    marker=dict(size=6),
+                    yaxis='y1',
+                    hovertemplate='Year %{x}<br>Net Cash Flow: €%{y:,.2f}<extra></extra>'
+                ))
+
+                # Add a line trace for Cumulative Cash Flow on a secondary y-axis
+                fig.add_trace(go.Scatter(
+                    x=df_cash_flow['Year'],
+                    y=df_cash_flow['Cumulative Cash Flow'],
+                    name='Cumulative Cash Flow',
+                    mode='lines+markers',
+                    line=dict(color='orange', width=2, dash='dash'),
+                    marker=dict(size=6),
+                    yaxis='y2',
+                    hovertemplate='Year %{x}<br>Cumulative Cash Flow: €%{y:,.2f}<extra></extra>'
+                ))
+
+                # Update the layout
+                fig.update_layout(
+                    title=f'Annual Cash Flows with IRR: {best_config["irr"]:.2f}%',
+                    xaxis=dict(
+                        title='Year',
+                        tickmode='linear',
+                        dtick=1
+                    ),
+                    yaxis=dict(
+                        title='Cash Flow (€)',
+                        side='left',
+                        showgrid=True,
+                        range=[min_value, max_value],
+                        zeroline=True,
+                        zerolinewidth=1,
+                        zerolinecolor='grey'
+                    ),
+                    yaxis2=dict(
+                        title='Cumulative Cash Flow (€)',
+                        side='right',
+                        overlaying='y',
+                        showgrid=False,
+                        range=[min_value, max_value],
+                        zeroline=True,
+                        zerolinewidth=1,
+                        zerolinecolor='grey'
+                    ),
+                    legend=dict(
+                        x=0.8,
+                        y=0.01,
+                        bordercolor='black',
+                        borderwidth=1
+                    ),
+                    template='plotly_white',
+                    height=600,
+                    barmode='relative'
                 )
 
-                max_value = max(
-                    df_cash_flow[['CAPEX', 'Revenue', 'OPEX', 'Replacement Cost']].sum(axis=1).max(),
-                    df_cash_flow['Net Cash Flow'].max(),
-                    df_cash_flow['Cumulative Cash Flow'].max(),
-                )
+                # Adjust margins to prevent clipping of labels
+                fig.update_layout(margin=dict(l=60, r=60, t=60, b=60))
 
-
-                ax1.set_ylim(bottom=min_value + 0.1*min_value, top=max_value+0.1*max_value)
-                #ax2.set_ylim(bottom=min_value - 0.05*min_value, top=max_value+0.05*max_value)
-
-                # Set labels and titles
-                ax1.set_xlabel('Year')
-                ax1.set_ylabel('Cash Flow (M€)')
-                ax2.set_ylabel('Cumulative Cash Flow (M€)')
-                ax1.set_title('Annual Cash Flows with IRR: {:.2f}%'.format(best_config['irr']))
-
-                # Combine legends from both axes
-                lines1, labels1 = ax1.get_legend_handles_labels()
-                lines2, labels2 = ax2.get_legend_handles_labels()
-                ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-
-                st.pyplot(fig)
+                # Display the chart in Streamlit
+                st.plotly_chart(fig)
 
                 hypotheses = {
                     'Coordinates (Latitude)': latitude,
@@ -1236,8 +1332,6 @@ if st.sidebar.button("✅ Calculate") and latitude is not None and longitude is 
                     'Target Internal Rate of Return (% per year)': target_irr,
                 }
 
-                # Reset index and rename it to 'Year' for clarity
-                df_cash_flow = df_cash_flow.reset_index().rename(columns={'index': 'Year'})
 
                 # Create a BytesIO buffer to hold the Excel file in memory
                 output = io.BytesIO()
